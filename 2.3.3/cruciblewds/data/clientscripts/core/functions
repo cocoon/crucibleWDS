@@ -1,0 +1,1901 @@
+#!/bin/sh
+#  
+#    CrucibleWDS A Windows Deployment Solution
+#    Copyright (C) 2011  Jon Dolny
+#
+#    This program is free software: you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation, either version 3 of the License, or
+#    any later version.
+#
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License
+#    along with this program.  If not, see <http://www.gnu.org/licenses/.
+#
+# 	Some code snippets have been used from the Fog Project
+
+if [ -a "/tmp/WDS_KEY" ]; then
+	WDS_KEY=$(cat /tmp/WDS_KEY)
+fi
+
+if [ -n "$wds_if" ]; then
+	mac=`cat /sys/class/net/$wds_if/address`
+else
+	mac=`cat /sys/class/net/eth0/address`
+fi
+clientIP=`ifconfig  | grep 'inet addr:'| grep -v '127.0.0.1' | cut -d: -f2 | awk '{ print $1}'`
+
+
+function backupMBR()
+{
+	log " ** Saving MBR / GPT ** " "display"	
+
+	drive=$(echo $hd | cut -d "/" -f 3)
+	checkPartStart=$(cat /sys/block/$drive/${drive}1/start)
+	toSave=$(( $checkPartStart - 1 ))
+		
+	log " ...... drive: $drive checkPartStart: $checkPartStart toSave: $toSave mbrType: $mbrType"
+		
+	if [ "$xferMode" = "nfs" ] || [ "$xferMode" = "nfs+http" ] || [ "$xferMode" = "smb" ] || [ "$xferMode" = "smb+http" ]; then
+		dd if=$hd of=/images/$imgPath/table count=$toSave bs=512 &>> /tmp/clientlog.log 
+		if [ -s "/images/$imgPath/table" ]; then
+			log " ...... Success" "display"
+		else
+			error "Could Not Save MBR /GPT .  Check Permissions."
+		fi
+	else
+		dd if=$hd of=/tmp/table count=$toSave bs=512 &>> /tmp/clientlog.log
+		mbrResult=`curl -Ffile=@/tmp/table -FfileName="$(echo -n table | base64)" -FserverKey="$(echo -n "$WDS_KEY" | base64)" -FimagePath="$(echo -n $imgPath | base64)" -FfileType="$(echo -n mbr | base64)" -sSk "${web}upload" --stderr -`
+		log " ...... mbrResult: $mbrResult"
+		if [ "$mbrResult" = "true" ]; then
+			log " ...... Success" "display"
+		else
+			error "Could Not Save Partition Layout.  Check Permissions."
+		fi
+	fi			
+}
+
+function calcSize()
+{
+	log " ** Calculating Hard Drive(s) and Image Size ** " "display"
+	sleep 1
+	mkdir /mnt/ntfs &>/dev/null
+	
+	hdCounter=0
+	imageDetails="{\"image\":\"$imgName\",\"hd\": [ "
+	for hd in $disks; do
+		hdCounter=$(( $hdCounter + 1 ))
+		drive="";lbs="";pbs="";dsize="";hboot="";upGPT="";upMBR="";ptType="";hdGUID="";
+		drive=$(echo $hd | cut -d "/" -f 3)
+		lbs=$(cat /sys/block/$drive/queue/logical_block_size)
+		pbs=$(cat /sys/block/$drive/queue/physical_block_size)
+		dsize=$(cat /sys/block/$drive/size)
+		hboot=$(fdisk $hd -l | grep "*" | grep "dev" | cut -d" " -f1)
+		upGPT=`gdisk -l $hd <<< "q" 2>> /tmp/clientlog.log | grep 'GPT:' | awk '{$1=""; print $0}' | sed 's/^ //'`
+		if [ "$upGPT" = "present" ]; then
+			upMBR=`gdisk -l $hd <<< "q" 2>> /tmp/clientlog.log| grep 'MBR:' | awk '{$1=""; print $0}' | sed 's/^ //'`
+			ptType="gpt"
+			hdGUID=`gdisk -l $hd | grep GUID | awk -F': ' '{print $2}'`
+			if [ "$upMBR" = "MBR only" ]; then
+				error "This Hard Drive Appears To Have Both GPT And MBR.  CrucibleWDS Does Not Know What To Use.  You Must First Convert The Drive To One Or The Other Before Uploading"
+			fi
+		else
+			ptType="mbr"
+		fi
+		stringHD="{\"name\":\"$hd\",\"size\":\"$dsize\",\"table\":\"$ptType\",\"boot\":\"$hboot\",\"lbs\":\"$lbs\",\"pbs\":\"$pbs\",\"guid\":\"$hdGUID\",\"active\":\"1\",\"partition\": [ "
+		
+		getPartCountCalcSize
+		
+		counter=0
+		for part in $partsCalcSize; do
+			counter=$(( $counter + 1 ))
+			fsType="";pUUID="";pGUID="";partCloneType="";pused="";pstart="";pend="";psize="";ptype="";
+			x=`echo $part | awk -F $hd ' {print $2}'`
+			fsType=`blkid -po udev $hd$x | grep FS_TYPE | awk -F'=' '{print $2}'`
+			pUUID=`blkid -po udev $hd$x | grep ID_FS_UUID= | awk -F'=' '{print $2}'`
+			
+			if [ "$ptType" = "gpt" ]; then
+				pGUID=`sgdisk $hd -i$x | grep "unique GUID" | awk -F ' ' '{print $4}'`
+			fi
+			
+			#In addition to setting partclone type, clean filesystems for better compatibility moving forward
+			if [ "$fsType" = "ntfs" ]; then
+				ntfsfix -b -d $hd$x &>/dev/null
+				ntfs-3g -o force,rw,remove_hiberfile $hd$x /mnt/ntfs 2> /dev/null
+				umount /mnt/ntfs
+				partCloneType="ntfs"
+					
+			elif [ "$fsType" = "ext2" ] || [ "$fsType" = "ext3" ] || [ "$fsType" = "ext4" ]; then
+				e2fsck -fp $hd$x &> /dev/null
+				partCloneType="extfs"
+
+			else
+				partCloneType="imager"
+			fi
+			partclone.$partCloneType -SIic -s $hd$x -O /dev/null >& /tmp/$x.size
+			pused=`cat /tmp/$x.size | grep used_part | awk -F':' '{print $2}' | sed 's/ *$//'`
+			
+			pstart=$(parted -s $hd unit s print all | grep " $x " -m 1 | awk -F' ' '{print $2}' | sed 's/s//g')
+			pend=$(parted -s $hd unit s print all | grep " $x " -m 1 | awk -F' ' '{print $3}' | sed 's/s//g')
+			psize=$(parted -s $hd unit s print all | grep " $x " -m 1 | awk -F' ' '{print $4}' | sed 's/s//g')
+			#GPT does not have a concept of partition type only mbr has primary, extended, or logical
+			if [ "$ptType" = "mbr" ]; then
+				ptype=$(parted -s $hd unit s print all | grep " $x " -m 1| awk -F' ' '{print $5}')
+				fsid=$(sfdisk -c $hd $x 2>> /tmp/clientlog.log)
+			else
+				fsid=$(gdisk $hd -l | grep " $x " | awk '/^ / {print $6}')
+			fi
+						
+			presize="";
+			if [ "$noResize" != "true" ]; then
+				if [ "$fsType" = "ext2" ] || [ "$fsType" = "ext3" ] || [ "$fsType" = "ext4" ] || [ "$fsType" = "ntfs" ]; then
+					getResizeValue $hd$x
+				fi
+			fi
+			stringPart="{\"number\":\"$x\",\"start\":\"$pstart\",\"end\":\"$pend\",\"size\":\"$psize\",\"resize\":\"$presize\",\"type\":\"$ptype\",\"used_mb\":\"$pused\",\"fstype\":\"$fsType\",\"fsid\":\"$fsid\",\"uuid\":\"$pUUID\",\"guid\":\"$pGUID\",\"active\":\"1\",\"size_override\":\"\",\"vg\": { "
+			
+			#experimental lvm support
+			if [ "$lvmResize" != "false" ]; then
+				if [ "$fsid" = "8e" ] || [ "$fsid" = "8E00" ]; then
+					vgscan &>> /tmp/clientlog.log		
+					lvmVG=$(pvs | grep $part | awk '/^ / {print $2}')
+					if [ "$?" = "0" ]; then
+						lvmExists=true
+						log " ** Displaying LVM Information ** "
+						pvdisplay &>>/tmp/clientlog.log
+						vgdisplay &>>/tmp/clientlog.log
+						lvdisplay &>>/tmp/clientlog.log
+					fi
+					vgchange -a y "$lvmVG"
+					lvmVGUUID=$(vgs -v  2>/dev/null | grep "$lvmVG" | awk '/^ / {print $9}')
+					lvmVGSize=$(vgs 2>/dev/null --units s | grep "$lvmVG" | awk '/^ /  {print $6}' | sed 's/S$//')
+					stringVG="\"name\":\"$lvmVG\",\"size\":\"$lvmVGSize\",\"type\":\"vg\",\"pv\":\"$part\",\"uuid\":\"$lvmVGUUID\",\"lv\": [ "
+				
+					lvmLVS=$(lvs | grep "$lvmVG" | awk '/^ / {print $1}')
+					lvmLVSCount=$(lvs | grep "$lvmVG" -c)
+					lvCounter=0
+					for logical_volume in $lvmLVS; do
+						#Escape - in vg or lv
+						esVG=$(echo $lvmVG | sed 's/-/--/g')
+						esLV=$(echo $logical_volume | sed 's/-/--/g')
+						lvHD="/dev/mapper/$esVG-$esLV"
+						lvCounter=$(( $lvCounter + 1 ))
+						fsType=`blkid -po udev "$lvHD" | grep FS_TYPE | awk -F'=' '{print $2}'`
+						lvUUID=`lvs -v 2>/dev/null | grep "$lvmVG" | grep "$logical_volume" | awk '/^ / {print $10}'`
+						lvSize=`lvs --units s | grep "$lvmVG" | grep "$logical_volume" | awk '/^ / {print $4}' | sed 's/S$//'`
+						#In addition to setting partclone type, clean filesystems for better compatibility moving forward
+						if [ "$fsType" = "ntfs" ]; then
+							ntfsfix -b -d "$lvHD" &>/dev/null
+							ntfs-3g -o force,rw,remove_hiberfile "$lvHD" /mnt/ntfs 2> /dev/null
+							umount /mnt/ntfs
+							partCloneType="ntfs"
+					
+						elif [ "$fsType" = "ext2" ] || [ "$fsType" = "ext3" ] || [ "$fsType" = "ext4" ]; then
+							e2fsck -fp "$lvHD" &> /dev/null
+							partCloneType="extfs"
+
+						else
+							partCloneType="imager"
+						fi
+					
+						partclone.$partCloneType -SIic -s "$lvHD" -O /dev/null >& /tmp/lv$lvCounter.size
+						lvused=`cat /tmp/lv$lvCounter.size | grep used_part | awk -F':' '{print $2}' | sed 's/ *$//'`
+					
+						presize="";
+						if [ "$fsType" = "ext2" ] || [ "$fsType" = "ext3" ] || [ "$fsType" = "ext4" ] || [ "$fsType" = "ntfs" ]; then
+							getResizeValue "$lvHD"
+						fi
+					
+						stringLV="{\"name\":\"$logical_volume\",\"size\":\"$lvSize\",\"resize\":\"$presize\",\"type\":\"lv\",\"vg\":\"$lvmVG\",\"used_mb\":\"$lvused\",\"fstype\":\"$fsType\",\"uuid\":\"$lvUUID\",\"active\":\"1\",\"size_override\":\"\"}"
+						if [ "$lvCounter" = "$lvmLVSCount" ]; then
+							stringLV="$stringLV] } }"
+						else
+							stringLV="$stringLV,"
+						fi
+					
+						stringAllLVS=$stringAllLVS$stringLV
+					
+					done
+				
+					stringVGSLVS=$stringVG$stringAllLVS
+				
+					if [ "$counter" = "$partCount" ]; then
+						stringAllParts="$stringAllParts$stringPart$stringVGSLVS] }"
+					else
+						stringAllParts="$stringAllParts$stringPart$stringVGSLVS,"
+					fi
+				else
+					stringPart="$stringPart} }"
+				
+					if [ "$counter" = "$partCount" ]; then
+						stringAllParts="$stringAllParts$stringPart] }"
+					else
+						stringAllParts="$stringAllParts$stringPart,"
+					fi
+				
+				fi
+			
+			else
+				stringPart="$stringPart} }"
+				
+				if [ "$counter" = "$partCount" ]; then
+					stringAllParts="$stringAllParts$stringPart] }"
+				else
+					stringAllParts="$stringAllParts$stringPart,"
+				fi
+			fi
+			
+		done
+		
+		stringAllHds=$stringAllHds$stringHD$stringAllParts
+		if [ "$hdCounter" = "$hdCount" ]; then
+			stringAllHds="$stringAllHds] }"
+		else
+			stringAllHds="$stringAllHds,"
+		fi
+		
+		stringAllParts=""
+	done
+	
+	imageDetails=$imageDetails$stringAllHds
+	imageSpecsResult=`curl -FimgName="$(echo -n $imgName | base64)" -FimageSize="$(echo -n $imageDetails | base64)" -sSk "${web}imagesize" --stderr -`
+	log " ...... imageDetails: $imageDetails"	
+	log " ...... Complete" "display"
+	echo
+	sleep 2 
+	
+	#Create a backup copy of image specs because image is basically worthless without this info
+	if [ "$xferMode" = "nfs" ] || [ "$xferMode" = "nfs+http" ] || [ "$xferMode" = "smb" ] || [ "$xferMode" = "smb+http" ]; then
+		echo $imageDetails > /images/$imgName/specs.bak		
+	else
+		echo $imageDetails > /tmp/specs.bak
+		nullResult=`curl -Ffile=@/tmp/specs.bak -FfileName="$(echo -n specs.bak | base64)" -FserverKey="$(echo -n "$WDS_KEY" | base64)" -FimagePath="$(echo -n $imgName | base64)" -FfileType="$(echo -n mbr | base64)" -sSk "${web}upload" --stderr -`
+	fi			
+	
+	if [ "$imageSpecsResult" != "true" ]; then
+		error "Could Not Verify Image Specifications Was Saved Correctly"
+	fi
+	
+}
+
+function calcSizeDebug()
+{
+#Same as previous function but with output to screen for debugging, as this seems to be where things can go wrong
+#Seemed easier than 100 if statements
+	log " ** Calculating Hard Drive(s) and Image Size ** " "display"
+	sleep 1
+	mkdir /mnt/ntfs &>/dev/null
+	
+	hdCounter=0
+	imageDetails="{\"image\":\"$imgName\",\"hd\": [ "
+	for hd in $disks; do
+		log " ...... using $hd" "display"
+		hdCounter=$(( $hdCounter + 1 ))
+		drive="";lbs="";pbs="";dsize="";hboot="";upGPT="";upMBR="";ptType="";hdGUID="";
+		drive=$(echo $hd | cut -d "/" -f 3)
+		lbs=$(cat /sys/block/$drive/queue/logical_block_size)
+		pbs=$(cat /sys/block/$drive/queue/physical_block_size)
+		dsize=$(cat /sys/block/$drive/size)
+		hboot=$(fdisk $hd -l | grep "*" | grep "dev" | cut -d" " -f1)
+		upGPT=`gdisk -l $hd <<< "q" 2>> /tmp/clientlog.log | grep 'GPT:' | awk '{$1=""; print $0}' | sed 's/^ //'`
+		if [ "$upGPT" = "present" ]; then
+			upMBR=`gdisk -l $hd <<< "q" 2>> /tmp/clientlog.log| grep 'MBR:' | awk '{$1=""; print $0}' | sed 's/^ //'`
+			ptType="gpt"
+			hdGUID=`gdisk -l $hd | grep GUID | awk -F': ' '{print $2}'`
+			if [ "$upMBR" = "MBR only" ]; then
+				error "This Hard Drive Appears To Have Both GPT And MBR.  CrucibleWDS Does Not Know What To Use.  You Must First Convert The Drive To One Or The Other Before Uploading"
+			fi
+		else
+			ptType="mbr"
+		fi
+		stringHD="{\"name\":\"$hd\",\"size\":\"$dsize\",\"table\":\"$ptType\",\"boot\":\"$hboot\",\"lbs\":\"$lbs\",\"pbs\":\"$pbs\",\"guid\":\"$hdGUID\",\"active\":\"1\",\"partition\": [ "
+		log " ...... getting partition count" "display"
+		getPartCountCalcSize
+		log " ...... found $partCount partitions" "display"
+		counter=0
+		for part in $partsCalcSize; do
+			counter=$(( $counter + 1 ))
+			fsType="";pUUID="";pGUID="";partCloneType="";pused="";pstart="";pend="";psize="";ptype="";
+			x=`echo $part | awk -F $hd ' {print $2}'`
+			fsType=`blkid -po udev $hd$x | grep FS_TYPE | awk -F'=' '{print $2}'`
+			pUUID=`blkid -po udev $hd$x | grep ID_FS_UUID= | awk -F'=' '{print $2}'`
+			
+			if [ "$ptType" = "gpt" ]; then
+				pGUID=`sgdisk $hd -i$x | grep "unique GUID" | awk -F ' ' '{print $4}'`
+			fi
+			
+			#In addition to setting partclone type, clean filesystems for better compatibility moving forward
+			if [ "$fsType" = "ntfs" ]; then
+				log " ...... cleaning ntfs partition $part" "display"
+				ntfsfix -b -d $hd$x 
+				ntfs-3g -o force,rw,remove_hiberfile $hd$x /mnt/ntfs
+				umount /mnt/ntfs
+				partCloneType="ntfs"
+					
+			elif [ "$fsType" = "ext2" ] || [ "$fsType" = "ext3" ] || [ "$fsType" = "ext4" ]; then
+			log " ...... cleaning ext partition $part" "display"
+				e2fsck -fp $hd$x 
+				partCloneType="extfs"
+
+			else
+				partCloneType="imager"
+			fi
+			log " ...... estimating used partition size with partclone" "display"
+			partclone.$partCloneType -SIic -s $hd$x -O /dev/null
+			
+			partclone.$partCloneType -SIic -s $hd$x -O /dev/null >& /tmp/$x.size
+			
+			pused=`cat /tmp/$x.size | grep used_part | awk -F':' '{print $2}' | sed 's/ *$//'`
+			log " ...... estimate size is $pused" "display"
+			
+			pstart=$(parted -s $hd unit s print all | grep " $x " -m 1 | awk -F' ' '{print $2}' | sed 's/s//g')
+			pend=$(parted -s $hd unit s print all | grep " $x " -m 1 | awk -F' ' '{print $3}' | sed 's/s//g')
+			psize=$(parted -s $hd unit s print all | grep " $x " -m 1 | awk -F' ' '{print $4}' | sed 's/s//g')
+			#GPT does not have a concept of partition type only mbr has primary, extended, or logical
+			if [ "$ptType" = "mbr" ]; then
+				ptype=$(parted -s $hd unit s print all | grep " $x " -m 1| awk -F' ' '{print $5}')
+				fsid=$(sfdisk -c $hd $x 2>> /tmp/clientlog.log)
+			else
+				fsid=$(gdisk $hd -l | grep " $x " | awk '/^ / {print $6}')
+			fi
+			
+			log " ...... partition type is $ptype" "display"
+			log " ...... filesystem id is $fsid" "display"
+			presize="";
+			if [ "$noResize" != "true" ]; then
+				if [ "$fsType" = "ext2" ] || [ "$fsType" = "ext3" ] || [ "$fsType" = "ext4" ] || [ "$fsType" = "ntfs" ]; then
+					log " ...... getting resize value for $fsType" "display"
+					getResizeValueDebug $hd$x
+				fi
+			fi
+			log " ...... resize value is $presize" "display"
+			stringPart="{\"number\":\"$x\",\"start\":\"$pstart\",\"end\":\"$pend\",\"size\":\"$psize\",\"resize\":\"$presize\",\"type\":\"$ptype\",\"used_mb\":\"$pused\",\"fstype\":\"$fsType\",\"fsid\":\"$fsid\",\"uuid\":\"$pUUID\",\"guid\":\"$pGUID\",\"active\":\"1\",\"size_override\":\"\",\"vg\": { "
+			
+			#experimental lvm support
+			if [ "$lvmResize" != "false" ]; then
+				if [ "$fsid" = "8e" ] || [ "$fsid" = "8E00" ]; then
+					vgscan 		
+					lvmVG=$(pvs | grep $part | awk '/^ / {print $2}')
+					if [ "$?" = "0" ]; then
+						lvmExists=true
+						log " ** Displaying LVM Information ** " "display"
+						pvdisplay 
+						vgdisplay 
+						lvdisplay 
+					fi
+					vgchange -a y "$lvmVG"
+					lvmVGUUID=$(vgs -v  | grep "$lvmVG" | awk '/^ / {print $9}')
+					lvmVGSize=$(vgs --units s | grep "$lvmVG" | awk '/^ /  {print $6}' | sed 's/S$//')
+					stringVG="\"name\":\"$lvmVG\",\"size\":\"$lvmVGSize\",\"type\":\"vg\",\"pv\":\"$part\",\"uuid\":\"$lvmVGUUID\",\"lv\": [ "
+				
+					lvmLVS=$(lvs | grep "$lvmVG" | awk '/^ / {print $1}')
+					lvmLVSCount=$(lvs | grep "$lvmVG" -c)
+					lvCounter=0
+					for logical_volume in $lvmLVS; do
+						#Escape - in vg or lv
+						esVG=$(echo $lvmVG | sed 's/-/--/g')
+						esLV=$(echo $logical_volume | sed 's/-/--/g')
+						lvHD="/dev/mapper/$esVG-$esLV"
+						lvCounter=$(( $lvCounter + 1 ))
+						fsType=`blkid -po udev "$lvHD" | grep FS_TYPE | awk -F'=' '{print $2}'`
+						lvUUID=`lvs -v 2>/dev/null | grep "$lvmVG" | grep "$logical_volume" | awk '/^ / {print $10}'`
+						lvSize=`lvs --units s | grep "$lvmVG" | grep "$logical_volume" | awk '/^ / {print $4}' | sed 's/S$//'`
+						#In addition to setting partclone type, clean filesystems for better compatibility moving forward
+						if [ "$fsType" = "ntfs" ]; then
+							ntfsfix -b -d "$lvHD" 
+							ntfs-3g -o force,rw,remove_hiberfile "$lvHD" /mnt/ntfs 
+							umount /mnt/ntfs
+							partCloneType="ntfs"
+					
+						elif [ "$fsType" = "ext2" ] || [ "$fsType" = "ext3" ] || [ "$fsType" = "ext4" ]; then
+							e2fsck -fp "$lvHD" 
+							partCloneType="extfs"
+
+						else
+							partCloneType="imager"
+						fi
+						log " ...... getting partclone resize value" "display"
+						partclone.$partCloneType -SIic -s "$lvHD" -O /dev/null
+						partclone.$partCloneType -SIic -s "$lvHD" -O /dev/null >& /tmp/lv$lvCounter.size
+						lvused=`cat /tmp/lv$lvCounter.size | grep used_part | awk -F':' '{print $2}' | sed 's/ *$//'`
+						log " ...... estimate size is $lvused" "display"
+						presize="";
+						if [ "$fsType" = "ext2" ] || [ "$fsType" = "ext3" ] || [ "$fsType" = "ext4" ] || [ "$fsType" = "ntfs" ]; then
+							log " ...... getting resize value for $fsType" "display"
+							getResizeValueDebug "$lvHD"
+						fi
+						log " ...... resize value is $presize" "display"
+						stringLV="{\"name\":\"$logical_volume\",\"size\":\"$lvSize\",\"resize\":\"$presize\",\"type\":\"lv\",\"vg\":\"$lvmVG\",\"used_mb\":\"$lvused\",\"fstype\":\"$fsType\",\"uuid\":\"$lvUUID\",\"active\":\"1\",\"size_override\":\"\"}"
+						if [ "$lvCounter" = "$lvmLVSCount" ]; then
+							stringLV="$stringLV] } }"
+						else
+							stringLV="$stringLV,"
+						fi
+					
+						stringAllLVS=$stringAllLVS$stringLV
+					
+					done
+				
+					stringVGSLVS=$stringVG$stringAllLVS
+				
+					if [ "$counter" = "$partCount" ]; then
+						stringAllParts="$stringAllParts$stringPart$stringVGSLVS] }"
+						log " ...... building string $stringAllParts" "display"
+					else
+						stringAllParts="$stringAllParts$stringPart$stringVGSLVS,"
+						log " ...... building string $stringAllParts" "display"
+					fi
+				else
+					stringPart="$stringPart} }"
+				
+					if [ "$counter" = "$partCount" ]; then
+						stringAllParts="$stringAllParts$stringPart] }"
+						log " ...... building string $stringAllParts" "display"
+					else
+						stringAllParts="$stringAllParts$stringPart,"
+						log " ...... building string $stringAllParts" "display"
+					fi
+				
+				fi
+			
+			else
+				stringPart="$stringPart} }"
+				
+				if [ "$counter" = "$partCount" ]; then
+					stringAllParts="$stringAllParts$stringPart] }"
+					log " ...... building string $stringAllParts" "display"
+				else
+					stringAllParts="$stringAllParts$stringPart,"
+					log " ...... building string $stringAllParts" "display"
+				fi
+			fi
+			
+		done
+		
+		stringAllHds=$stringAllHds$stringHD$stringAllParts
+		if [ "$hdCounter" = "$hdCount" ]; then
+			stringAllHds="$stringAllHds] }"
+		else
+			stringAllHds="$stringAllHds,"
+		fi
+		
+		stringAllParts=""
+	done
+	
+	imageDetails=$imageDetails$stringAllHds
+	imageSpecsResult=`curl -FimgName="$(echo -n $imgName | base64)" -FimageSize="$(echo -n $imageDetails | base64)" -sSk "${web}imagesize" --stderr -`
+	log " ...... imageDetails: $imageDetails"	
+	log " ...... Complete" "display"
+	echo
+	sleep 2 
+	
+	#Create a backup copy of image specs because image is basically worthless without this info
+	if [ "$xferMode" = "nfs" ] || [ "$xferMode" = "nfs+http" ] || [ "$xferMode" = "smb" ] || [ "$xferMode" = "smb+http" ]; then
+		echo $imageDetails > /images/$imgName/specs.bak		
+	else
+		echo $imageDetails > /tmp/specs.bak
+		nullResult=`curl -Ffile=@/tmp/specs.bak -FfileName="$(echo -n specs.bak | base64)" -FserverKey="$(echo -n "$WDS_KEY" | base64)" -FimagePath="$(echo -n $imgName | base64)" -FfileType="$(echo -n mbr | base64)" -sSk "${web}upload" --stderr -`
+	fi			
+	
+	if [ "$imageSpecsResult" != "true" ]; then
+		error "Could Not Verify Image Specifications Was Saved Correctly"
+	fi
+	
+	echo "Press Enter To Continue"
+	read taskType
+}
+
+function changeHostName()
+{
+	if [ -n "$hostName" ]; then
+		mkdir -p /win
+		
+		for x in $parts; do		
+			fsType=`ls /images/$imgPath | grep part$x | grep -o '\.[a-z]*\.' | sed 's/\.//g'`
+		
+			if [ "$fsType" = "ntfs" ]; then
+				log " ** Changing Host Name On $hd$x ** " "display"
+				sleep 1
+		
+				ntfs-3g -o force,rw,remove_hiberfile $hd$x /win &>/dev/null
+				if [ "$?" = "0" ]; then
+					#Win 8
+					if [ -f "/win/Windows/System32/Sysprep/unattend.xml" ]; then
+						log " ...... Found Answer File, Changing Host Name" "display"
+						rm /win/Windows/System32/Sysprep/unattend.xml
+						cd /win/Windows/Panther
+						cat unattend.xml | sed -e s/CrucibleWDS/$hostName/ > unattend.tmp
+						mv unattend.tmp unattend.xml
+					#Win 7 and Vista
+					elif [ -f "/win/Windows/System32/sysprep/unattend.xml" ]; then
+						log " ...... Found Answer File, Changing Host Name" "display"
+						rm /win/Windows/System32/sysprep/unattend.xml
+						cd /win/Windows/Panther
+						cat unattend.xml | sed -e s/CrucibleWDS/$hostName/ > unattend.tmp
+						mv unattend.tmp unattend.xml
+					#Win XP
+					elif [ -f "/win/Sysprep/sysprep.inf" ]; then
+						log " ...... Found Answer File, Changing Host Name" "display"
+						cd /win/Sysprep
+						cat sysprep.inf | sed -e s/CrucibleWDS/$hostName/ > sysprep.tmp
+						mv sysprep.tmp sysprep.inf
+					else
+						log " ...... Could Not Find Answer File, Attempting Registry Change" "display"
+						root="/win/Windows/System32/config/SYSTEM"
+						hnkey1="\ControlSet001\Services\Tcpip\Parameters\NV Hostname"
+						hnkey2="\ControlSet001\Control\ComputerName\ComputerName\ComputerName"
+						changename
+					
+						hnkey1="\ControlSet001\Services\Tcpip\Parameters\Hostname"
+						hnkey1="\ControlSet001\Services\Tcpip\Parameters\HostName"
+						changename
+						
+						hnkey1="\ControlSet001\Services\Tcpip\Parameters\NV HostName"
+						hnkey2="\ControlSet001\Control\ComputerName\ComputerName\ComputerName"
+						changename		
+
+						root="/win/Windows/System32/config/SYSTEM"
+						hnkey1="\ControlSet001\services\Tcpip\Parameters\NV Hostname"
+						hnkey2="\ControlSet001\Control\ComputerName\ComputerName\ComputerName"
+						changename		
+
+						root="/win/Windows/System32/config/SYSTEM"
+						hnkey1="\ControlSet001\services\Tcpip\Parameters\NV Hostname"
+						hnkey2="\ControlSet001\Control\ComputerName\ComputerName\ComputerName"
+						changename		
+
+						root="/win/WINDOWS/system32/config/system"
+						hnkey1="\ControlSet001\Services\Tcpip\Parameters\NV Hostname"
+						hnkey2="\ControlSet001\Control\ComputerName\ComputerName\ComputerName"
+						changename
+					fi
+					echo
+					cd /
+					umount /win	
+				fi
+			fi
+		done
+	else
+		log " ...... Could Not Determine The Host Name Of This Machine.  Host Name Has Not Been Changed."
+	fi
+}
+
+function changename()
+{
+	reged -e "$root" &>/dev/null  <<EOFN 
+ed $hnkey1
+$hostName
+ed $hnkey2
+$hostName
+q
+y
+EOFN
+
+}
+	
+function checkin()
+{
+	#Set hardware clock
+	if [ "$skipClock" != "true" ]; then
+		log " ** Setting Hardware Clock And System Time ** " "display"
+		localdttm=`curl -sSk "${web}getlocaldatetime" --connect-timeout 10 --stderr -`
+		hwclock --localtime --set --date "$localdttm"
+		log " ...... Hardware Clock Set To Local Time: $localdttm" "display"
+		
+		utcdttm=`curl -sSk "${web}getutcdatetime" --connect-timeout 10 --stderr -`
+		date -s "$utcdttm" &>> /dev/null
+		log " ...... System Date Set To UTC Time: $utcdttm" "display"
+		
+		echo
+	fi
+	
+	log " ** Looking For Active Task ** " "display"
+	taskArgs=`curl -sSk -FserverKey="$(echo -n "$WDS_KEY" | base64)" -Fmac="$(echo -n $mac | base64)" "${web}checkin" --connect-timeout 10 --stderr -`
+	if [ ! "$?" = "0" ]; then
+		error "$taskArgs"
+	else
+		sleep 1
+		for arg in "$taskArgs"; do case "$arg" in *=*) eval "$arg"; log "$arg"; esac; done
+		log " ...... $checkInResult" "display"	
+	fi
+
+	if [ ! "$checkInResult" = "Success" ]; then
+		if [ "${#checkInResult}" = "0" ]; then
+			error "$taskArgs"
+		else
+			error "$checkInResult"
+		fi
+	fi
+		
+	echo
+	sleep 2
+}
+
+function checkout()
+{
+	echo
+	log " ** Closing Active Task ** " "display"
+	cd /
+	sleep 10
+	umount /images &> /dev/null
+	sleep 2
+	if [ "$multicast" = "true" ]; then
+	mccheckoutResult=`curl -sSk -FportBase="$(echo -n $portBase | base64)" "${web}mccheckout" --connect-timeout 10 --stderr -`
+		log " ...... $mccheckoutResult"
+	fi
+	
+		if [ "$hostID" = "" ]; then
+			hostID="ondemand"
+			saveLocation="logs"
+		else
+			saveLocation="host"
+		fi
+		
+		if [ "$imgDirection" = "pull" ]; then
+			logName=$hostID.upload
+		else
+			logName=$hostID.download
+		fi
+	
+		checkoutResult=`curl -sSk -FserverKey="$(echo -n "$WDS_KEY" | base64)" -FimgName="$(echo -n $imgName | base64)" -Fdirection="$(echo -n $imgDirection | base64)" -Fmac="$(echo -n $mac | base64)" "${web}checkout" --stderr -`
+		if [ ! "$?" = "0" ]; then
+			error "Could Not close Active Task"
+		else
+			sleep 1;
+			log " ...... $checkoutResult" "display"
+			cat /tmp/clientlog.log | grep -v "percent completed" > /tmp/cleanedlog.log
+			curl -Ffile=@/tmp/cleanedlog.log -FfileName="$(echo -n $logName | base64)" -FserverKey="$(echo -n "$WDS_KEY" | base64)" -FfileType="$(echo -n log | base64)" -FimagePath="$(echo -n "$saveLocation" |base64)" -sSk "${web}upload" --stderr - &>> /tmp/clientlog.log
+			echo
+		fi
+		
+		sleep 1;
+	if [ "$shutdown" = "poweroff" ]; then
+		poweroff;
+	elif [ "$shutdown" = "noshut" ]; then
+		return 0;
+	else
+		reboot -f
+	fi
+	
+}
+
+function checkUpGPT()
+{
+	log " ** Checking For Partition Table Types Before Upload ** "
+	upGPT=`gdisk -l $hd <<< "q" 2>> /tmp/clientlog.log | grep 'GPT:' | awk '{$1=""; print $0}' | sed 's/^ //'`
+	if [ "$upGPT" = "present" ]; then
+		usingGPT=true
+		upMBR=`gdisk -l $hd <<< "q" 2>> /tmp/clientlog.log| grep 'MBR:' | awk '{$1=""; print $0}' | sed 's/^ //'`
+		if [ "$upMBR" = "MBR only" ]; then
+			error "This Hard Drive Appears To Have Both GPT And MBR.  CrucibleWDS Does Not Know What To Use.  You Must First Convert The Drive To One Or The Other Before Uploading"
+		fi
+	fi
+	log " ...... upGPT: $upGPT upMBR: $upMBR" 
+}
+
+function clearMBR()
+{
+	
+	log " ** Clearing MBR / GPT ** "
+	sgdisk -Z $hd &>>/tmp/clientlog.log
+	dd if=/dev/zero of=$hd bs=512 count=2047 &>>/tmp/clientlog.log
+	partprobe &> /dev/null
+}
+
+function deleteAllPartitions()
+{
+	#Delete all partitions but keep boot record intact
+	log " ** Deleting Existing Partitions ** "
+	if [ "$usingGPT" = "true" ]; then
+	gptPartCount=$(gdisk -l $1 2> /dev/null| awk '/^ / {print $1}' | grep -vi mbr | grep -vi gpt | grep -vi bsd | grep -vi apm -c)
+	deleteCounter=0
+		while [ "$gptPartCount" -gt "0" ]; do
+			deleteCounter=$(( $deleteCounter + 1 ))
+			echo "gdisk $1 &>/dev/null <<GDISK" > /tmp/partitionDelete
+			for part_num in $(gdisk -l $1 2> /dev/null | awk '/^ / {print $1}' | grep -vi mbr | grep -vi gpt | grep -vi bsd | grep -vi apm); do			
+				echo d >> /tmp/partitionDelete
+				echo "$part_num" >> /tmp/partitionDelete
+			done
+			
+			echo w >> /tmp/partitionDelete
+			echo y >> /tmp/partitionDelete
+			echo y >> /tmp/partitionDelete
+			echo q >> /tmp/partitionDelete
+			echo GDISK >> /tmp/partitionDelete
+			cat /tmp/partitionDelete >> /tmp/clientlog.log
+			bash /tmp/partitionDelete
+			
+			gdisk $1 &>/dev/null <<GDISK
+d
+$part_num
+w
+y
+y
+q
+GDISK
+			gptPartCount=$(gdisk -l $1 2> /dev/null | awk '/^ / {print $1}' | grep -vi mbr | grep -vi gpt | grep -vi bsd | grep -vi apm -c)
+			if [ "$deleteCounter" -gt "1000" ]; then
+				log " ...... Partitions Still Exist"
+				gdisk -l $1 &>>/tmp/clientlog.log
+				error "Could Not Delete GPT Partitions"
+				
+			fi
+		done		
+	else
+		mbrPartCount=$(fdisk -l 2>/dev/null | grep $hd | grep -v ${hd}: -c)
+		log "$mbrPartCount"
+		deleteCounter=0
+		while [ "$mbrPartCount" -gt "0" ]; do
+			deleteCounter=$(( $deleteCounter + 1 ))
+			fdisk $1 &>/dev/null <<FDISK
+d
+
+
+w
+FDISK
+			mbrPartCount=$(fdisk -l 2>/dev/null | grep $hd | grep -v ${hd}: -c)
+			if [ "$deleteCounter" -gt "1000" ]; then
+				log " ...... Partitions Still Exist"
+				fdisk -l &>>/tmp/clientlog.log
+				error "Could Not Delete MBR Partitions"			
+			fi
+		done
+	fi
+}
+
+function error()
+{
+	echo
+	log " ** An Error Has Occurred ** " "display"
+	log " ...... $1" "display"
+	echo
+	echo " ** Rebooting In One Minute ** "
+	
+	if [ "$hostID" = "" ]; then
+			hostID="ondemand"
+			saveLocation="logs"
+	else
+			saveLocation="host"
+	fi
+		
+	if [ "$imgDirection" = "pull" ]; then
+		logName=$hostID.upload
+	else
+		logName=$hostID.download
+	fi
+	
+	cat /tmp/clientlog.log | grep -v "percent completed" > /tmp/cleanedlog.log
+	null=`curl -Ffile=@/tmp/cleanedlog.log -FfileName="$(echo -n $logName | base64)" -FserverKey="$(echo -n "$WDS_KEY" | base64)" -FfileType="$(echo -n log | base64)" -FimagePath="$(echo -n "$saveLocation" |base64)" -sSk "${web}upload" --stderr -`
+	sleep 60
+	if [ "$shutdown" = "poweroff" ]; then
+		poweroff;
+	elif [ "$shutdown" = "noshut" ]; then
+		/bin/bash;
+	else
+		reboot -f
+	fi 
+}
+
+function expandFS()
+{
+if [ "$noResize" != "true" ]; then
+	if [ "$fsType" = "ext2" ] || [ "$fsType" = "ext3" ] || [ "$fsType" = "ext4" ]; then
+		log " ** Expanding EXT Filesystem On $1 ** " "display"
+		partprobe &>/dev/null;
+		sleep 5
+
+		resize2fs $1 &>/dev/null
+		e2fsck -fp $1 &>/dev/null
+
+		if [ ! "$?" = "0" ]; then
+			log "Warning, EXT File System Did Not Resize Properly.  Check Your Disk Size After Booting" "display"
+		else
+			log " ...... Success" "display"
+		fi
+		echo
+	
+	elif [ "$fsType" = "ntfs" ]; then
+		log " ** Expanding NTFS Filesystem on $1 ** " "display"
+
+		partprobe &>/dev/null;
+		sleep 5
+
+		ntfsresize $1 -f -b -P &>> /tmp/clientlog.log<< CONFIRM
+Y
+CONFIRM
+
+		if [ ! "$?" = "0" ]; then
+			log "Warning, NTFS File System Did Not Resize Properly.  Check Your Disk Size After Booting To Windows" "display"
+		else
+			log " ...... Success" "display"
+		fi
+	
+		echo 
+		ntfsfix -b -d $1 &>>/tmp/clientlog.log
+	fi
+fi
+}
+
+function fixNTFSGeo()
+{
+	if [ -n "$heads" ]; then
+		log " ** Fixing NTFS Geometry ** " "display"
+		for x in $parts; do			
+			partclone.ntfsfixboot -h $heads -t $spt -w $hd$x
+		done
+		
+		echo
+	fi
+}
+
+function getFileNames()
+{
+	log " ** Getting The Necessary File Names For This Image ** "
+	mkdir -p /images/$imgName &>>/tmp/clientlog.log
+	hdsAndFiles=`curl -sSk -FserverKey="$(echo -n "$WDS_KEY" | base64)" -FimgName="$(echo -n $imgName | base64)" "${web}getfilenames" --connect-timeout 10 --stderr -`
+	if [ ! "$?" = "0" ]; then
+		error "$hdsAndFiles"
+	fi
+	
+	if [ "$hdsAndFiles" != "false" ]; then
+		i=1
+		for hds in $hdsAndFiles; do
+		hdArray=$(echo "$hds" | tr "," "\n" )
+			for hd in $hdArray; do
+				fileArray=$(echo "$hd" | tr ";" "\n")
+					for file in $fileArray; do
+						if [ "$i" = "1" ]; then
+							touch /images/$imgName/$file
+						else
+							mkdir -p /images/$imgName/hd$i
+							touch /images/$imgName/hd$i/$file
+						fi
+					done
+				i=$(( $i + 1 ))
+			done
+		done
+	else
+		log " ...... hdsAndFiles: $hdsAndFiles"
+		error "Incorrect Key"
+	fi
+	
+	log " ...... hdsAndFiles: $hdsAndFiles"
+	
+}
+
+function getHD()
+{
+	log " ** Looking For Hard Drive(s) ** " "display"
+	log " ...... Displaying Available Devices "
+	blockdev --report &>> /tmp/clientlog.log
+	fdisk -l &>> /tmp/clientlog.log
+
+	#No Verification, Up to user to specify correct hds
+	if [ -n "$disks" ]; then
+		log " ...... HD Overridden By User, User Specified $disks" "display"
+		hdCount=0
+		for hdd in $disks; do	
+			hdCount=$(( $hdCount + 1 ))
+		done
+		return 0
+	fi
+	
+	hdCount=0
+
+	for i in hda hdb hdc hdd hde hdf sda sdb sdc sdd sde sdf vda vdb vdc vdd vde vdf; do		
+		hddResult=`fdisk -l 2>/dev/null | grep /dev/$i`
+		if [ -n "$hddResult" ]; then
+			if [ "$hdCount" = "0" ]; then
+				disks="/dev/$i"
+			else
+				disks="$disks /dev/$i"
+			fi
+			hdCount=$(( $hdCount + 1 ))
+		fi 
+	done
+	
+	log " ...... Found $hdCount Drive(s)"
+	log " ...... Drive(s): $disks"
+	log " ...... Looking For More "
+
+	disks2=$(partinfo --disks 2>> /tmp/clientlog.log)
+	for hdd in $disks2; do
+		if [[ $disks == *"$hdd"* ]]; then
+			log ""
+		else
+			disks="$disks $hdd"
+			hdCount=$(( $hdCount + 1 ))
+		fi	
+	done
+	
+	log " ...... Found $hdCount Drive(s)" "display"
+	log " ...... Drive(s): $disks" "display"
+	
+	if [ "$hdCount" = "0" ]; then
+		error "Could Not Find A Hard Drive Attached To This Computer.  Try A Different Kernel."
+	fi
+	sleep 2
+}
+
+function getPartCountUpload()
+{
+	#Manually specifying partitions is only valid for the first hd
+	if [ "$hdPass" = "1" ]; then
+		if [ -n "$parts" ]; then
+			log " ...... Partitions Overridden By User, User Specified $parts" "display"
+		else
+			parts=$(partinfo --parts $hd 2>> /tmp/clientlog.log)
+		fi
+	else
+		parts=$(partinfo --parts $hd 2>> /tmp/clientlog.log)
+	fi
+	
+	partCount=0	
+	for part in $parts; do
+		partCount=$(( $partCount + 1 ))
+	done
+	
+	sleep 2
+	
+	if [ "$partCount" = "0" ]; then
+		error "Unable To Determine Partition Count Or There Are No Partitions On This Drive"
+	fi	
+}
+
+function getPartCountCalcSize()
+{
+
+	partsCalcSize=$(partinfo --parts $hd 2>> /tmp/clientlog.log)
+	partCount=0	
+	for part in $partsCalcSize; do
+		partCount=$(( $partCount + 1 ))
+	done
+	
+	sleep 2
+	
+	if [ "$partCount" = "0" ]; then
+		error "Unable To Determine Partition Count Or There Are No Partitions On This Drive"
+	fi	
+}
+
+function getPartCountDeploy()
+{
+	log " ** Determining Number Of Partitions To Restore ** "
+
+	parts=`curl -sSkL "${web}getHDParameter?imgName=$imgName&paramName=activeParts&hdToGet=$hdToGet&partNumber=0" --connect-timeout 10 --stderr -`
+	
+	partCount=0
+	for part in $parts; do
+		partCount=$(( $partCount + 1 ))
+	done
+	
+	log " ...... partCount: $partCount parts: $parts"
+	
+	if [ "$partCount" = "0" ]; then
+		error "Could Not Determine The Number Of Partitions To Restore"
+	fi
+}
+
+function getResizeValue()
+{
+	log " ** Estimating Partition Resize Value On $1 ** "
+	newextsize="";newntfssize="";
+	if [ "$fsType" = "ext2" ] || [ "$fsType" = "ext3" ] || [ "$fsType" = "ext4" ]; then
+		
+		e2fsck -fp $1 &> /dev/null
+		extfssize=`resize2fs -P $1 2>/dev/null | awk -F': ' '{print $2}'`;
+		if [ -z "$extfssize" ]; then
+			log " ...... WARNING Could Not Determine A Resize Value For $1, This May Impact The Minimum HD Size Required For Deployment" "display"
+			resize2fs -P $1 >> /tmp/clientlog.log
+		else
+			fsblksize=`dumpe2fs -h $1 2>/dev/null | grep "^Block size:" | awk '{print $3}'`;
+			minpartsize=`expr $extfssize '*' $fsblksize`;
+			newextsize=`expr $minpartsize '*' 103 '/' 100 '/' 1024 '/' 1024`; 
+			presize=$newextsize
+			log " ...... extfssize: $extfssize fsblksize: $fsblksize minpartsize: $minpartsize"
+		fi
+	fi
+	
+	if [ "$fsType" = "ntfs" ]; then
+		ntfssize=`ntfsresize -f -i -P $1 | grep "bytes or" | cut -d" " -f8`;
+		if [ -z "$ntfssize" ]; then
+			log " ...... WARNING Could Not Determine A Resize Value For $1, This May Impact The Minimum HD Size Required For Deployment" "display"
+			ntfsresize -f -i -P $1 >> /tmp/clientlog.log
+		else	
+			newntfssize=`expr $ntfssize '*' 103 '/' 100`
+			presize=$newntfssize
+			log " ...... ntfssize: $ntfssize newntfssize: $newntfssize"
+		fi
+	fi
+	
+}
+
+function getResizeValueDebug()
+{
+	log " ** Estimating Partition Resize Value On $1 ** "
+	newextsize="";newntfssize="";
+	if [ "$fsType" = "ext2" ] || [ "$fsType" = "ext3" ] || [ "$fsType" = "ext4" ]; then
+		
+		e2fsck -fp $1
+		extfssize=`resize2fs -P $1 | awk -F': ' '{print $2}'`;
+		if [ -z "$extfssize" ]; then
+			log " ...... WARNING Could Not Determine A Resize Value For $1, This May Impact The Minimum HD Size Required For Deployment" "display"
+			resize2fs -P $1 
+		else
+			fsblksize=`dumpe2fs -h $1 | grep "^Block size:" | awk '{print $3}'`;
+			minpartsize=`expr $extfssize '*' $fsblksize`;
+			newextsize=`expr $minpartsize '*' 103 '/' 100 '/' 1024 '/' 1024`; 
+			presize=$newextsize
+			log " ...... extfssize: $extfssize fsblksize: $fsblksize minpartsize: $minpartsize"
+		fi
+	fi
+	
+	if [ "$fsType" = "ntfs" ]; then
+		ntfssize=`ntfsresize -f -i -P $1 | grep "bytes or" | cut -d" " -f8`;
+		if [ -z "$ntfssize" ]; then
+			log " ...... WARNING Could Not Determine A Resize Value For $1, This May Impact The Minimum HD Size Required For Deployment" "display"
+			ntfsresize -f -i -P $1
+		else	
+			newntfssize=`expr $ntfssize '*' 103 '/' 100`
+			presize=$newntfssize
+			log " ...... ntfssize: $ntfssize newntfssize: $newntfssize"
+		fi
+	fi
+	
+}
+
+function imageList()
+{
+	while [ "$imageID" = "" ]; do
+		if [ "$imageID" = "" ]; then
+			clear
+			
+			images=`curl -sSk -FserverKey="$(echo -n "$WDS_KEY" | base64)" "${web}listimages" --connect-timeout 10 --stderr -`
+			i=0
+			OLDIFS=$IFS;
+			IFS=',';
+			for image in $images; do
+				i=$((i+1));
+				echo $image;
+				if [ "$i" = "20" ]; then
+					echo
+					echo -n " ...... Select An Image ID (Enter For More): "
+					read imageID;
+					if [ -n "$imageID" ]; then
+						break
+					fi
+					clear
+					i=0
+				fi
+			done
+			IFS=$OLDIFS
+			echo
+			if [ -n "$imageID" ]; then
+				break
+			fi
+		
+			echo -n " ...... Select An Image ID (Enter To Repeat Listing): "
+			read imageID	
+		fi		
+		echo
+	done
+}
+function log()
+{
+	echo "" >> /tmp/clientlog.log
+	if [ "$2" = "display" ]; then
+		echo "$1" | tee -a /tmp/clientlog.log
+	else
+		echo "$1" >> /tmp/clientlog.log
+	fi
+}
+
+function logBootArgs()
+{
+	log " ** Displaying Boot Arguments ** "
+	log "$(cat /proc/cmdline) MAC: $mac"
+	uname -a >> /tmp/clientlog.log
+}
+
+function login()
+{
+	echo " ** You Must Be Logged In To Access This Mode ** "
+	echo
+	echo -n "Username: "
+	read username
+	echo -n "Password: "
+	stty -echo
+	read password
+	stty echo
+	echo
+	loginResult=`curl -Fusername="$(echo -n $username | base64)" -Fpassword="$(echo -n $password | base64)" -FserverKey="$(echo -n "$WDS_KEY" | base64)" -FclientIP="$(echo -n $clientIP | base64)" -Ftask="$(echo -n $task | base64)" -sSk "${web}consolelogin" --stderr -`
+	arr=$(echo $loginResult | tr "," "\n");
+			i=0;
+			for x in $arr; do
+   				userID[i]=$x;
+				i=$(( $i + 1 ))
+			done
+	if [ "${userID[0]}" != "true" ]; then
+		echo
+		error "Incorrect Login"
+	else
+		echo
+		echo " ...... Login Successful"
+		echo
+	fi
+}
+
+
+
+function mountNFS()
+{
+	log " ** Mounting NFS Share **" "display"
+	
+	mkdir /images &>> /tmp/clientlog.log
+	mount -o nolock,proto=tcp $storage /images 2>/tmp/mntstat
+	if [ ! $? = "0" ]; then
+		errormsg=$(cat /tmp/mntstat)
+		error "$errormsg"
+	else
+		log " ...... Success" "display"
+
+		cd /images/$imgName;
+		if [ ! $? = "0" ]; then
+			error "Could Not Change Directory To /images/$imgName Check Permissions"
+		fi
+	fi
+	
+	echo
+	sleep 2
+}
+
+function mountSMB()
+{
+	log " ** Mounting SMB Share **" "display"
+	mkdir /images &>> /tmp/clientlog.log
+	smbUser=`curl -Fcredential="$(echo -n username | base64)" -FserverKey="$(echo -n "$WDS_KEY" | base64)"  -sSk "${web}smbcredentials" --stderr -`
+	smbPass=`curl -Fcredential="$(echo -n password | base64)" -FserverKey="$(echo -n "$WDS_KEY" | base64)"  -sSk "${web}smbcredentials" --stderr -`
+	
+	for smbVersion in 3.0 2.1 2.0 1.0; do	
+		mount -t cifs $storage /images -o user=$smbUser,pass=$smbPass,dom=wds,vers=$smbVersion 2>/tmp/mntstat
+		if [ ! $? = "0" ]; then
+			cat /tmp/mntstat >> /tmp/clientlog.log
+			errormsg=$(cat /tmp/mntstat)
+			
+		else
+			log " ...... Success" "display"
+
+			cd /images/$imgName;
+			if [ ! $? = "0" ]; then
+				error "Could Not Change Directory To /images/$imgName Check Permissions"
+			fi
+			break
+		fi
+		if [ "$smbVersion" = "1.0" ]; then
+			error "$errormsg"
+		fi
+	done
+	
+	smbUser=""
+	smbPass=""
+	echo
+	sleep 2
+}
+
+function multicast()
+{		
+	isLVM="$1"
+	clear
+	
+	if [ "$isLVM" = "true" ]; then
+		for lv in $parts; do
+			unesLV=$(echo $lv | sed 's/--/-/g')
+			log " ** Starting Image Download For Partition $lv ** " "display"
+			sleep 7
+			echo
+		
+			upPart=`curl -sSk "${web}updateprogresspartition?hostName=$hostName&partition=$unesLV" --connect-timeout 10 --stderr -`
+			fsType=`ls /images/$imgPath | grep $unesLV | grep -o '\.[a-z]*\.' | sed 's/\.//g'`
+
+			log "fsType: $fsType"
+			if [ -n "$fsType" ]; then
+		
+				touch /tmp/clone.progress
+				log "reporter $hostName $web & udp-receiver --portbase $portBase --no-progress --mcast-rdv-address $serverIP $clientReceiverArgs | partclone.$fsType -B -r -o /dev/mapper/$lv"
+				reporter $hostName $web & udp-receiver --portbase $portBase --no-progress --mcast-rdv-address $serverIP $clientReceiverArgs | partclone.$fsType -B -r -o /dev/mapper/$lv			
+			fi
+
+			rm /tmp/clone.progress
+		
+			rm /tmp/clone.progress
+			cat /var/log/partclone.log >> /tmp/clientlog.log
+		
+			clear
+		done
+	
+	else
+		#Hard drive passes other than the first are not implemented yet.
+		log " ** Joining Multicast Session ** " "display"
+		echo
+		for x in $parts; do
+			log " ** Starting Image Download For Partition $x ** " "display"
+			sleep 7
+			echo
+
+			upPart=`curl -sSk "${web}updateprogresspartition?hostName=$hostName&partition=$hd$x" --connect-timeout 10 --stderr -`	
+			fsType=`ls /images/$imgPath | grep part$x | grep -o '\.[a-z]*\.' | sed 's/\.//g'`
+			log "fsType: $fsType"
+			if [ -n "$fsType" ]; then
+			
+				touch /tmp/clone.progress
+				log "reporter $hostName $web & udp-receiver --portbase $portBase --no-progress --mcast-rdv-address $serverIP $clientReceiverArgs | partclone.$fsType -B -r -o $hd$x"
+				reporter $hostName $web & udp-receiver --portbase $portBase --no-progress --mcast-rdv-address $serverIP $clientReceiverArgs | partclone.$fsType -B -r -o $hd$x
+			
+			fi
+
+			rm /tmp/clone.progress
+		
+			rm /tmp/clone.progress
+			cat /var/log/partclone.log >> /tmp/clientlog.log
+		
+			clear
+		done
+	fi
+}
+
+function ond_HostInfo()
+{
+	unicastInfo=`curl -sSk -FserverKey="$(echo -n "$WDS_KEY" | base64)" -Fdirection="$(echo -n $1 | base64)" -FimageID="$(echo -n $imageID | base64)" -Fmac="$(echo -n $mac | base64)" "${web}ucinfo" --connect-timeout 10 --stderr -`
+	if [[ $unicastInfo == *"Client Error:"* ]]; then
+		error "$unicastInfo"
+	fi
+	for arg in "$unicastInfo"; do case "$arg" in *=*) eval "$arg";; esac; done
+	
+}
+
+function pushGlobal()
+{
+	local partitionsCreated
+	local createDynamic
+	
+	tableType=`curl -sSkL "${web}getHDParameter?imgName=$imgName&paramName=table&hdToGet=$hdToGet&partNumber=0" --connect-timeout 10 --stderr -`
+	if [ "$tableType" = "gpt" ]; then
+		usingGPT=true
+	fi
+	clearMBR
+	restoreMBR
+	
+	
+	if [ "$minSizeResult" = "true" ]; then
+		log " ** Creating Dynamic Partition Table On $hd ** " "display"
+	
+		curl -sSkL "${web}getPartLayout?imgName=$imgName&hdToGet=$hdToGet&newHDSize=$newHDSize&clientHD=$hd&taskType=deploy" --connect-timeout 10 --stderr - | dos2unix > /tmp/newPartLayout
+		cat /tmp/newPartLayout >> /tmp/clientlog.log
+		
+		originalPartCount=`curl -sSkL "${web}getHDParameter?imgName=$imgName&paramName=partCount&hdToGet=$hdToGet&partNumber=0" --connect-timeout 10 --stderr -`
+		partCreatedCounter=0
+		if [ "$usingGPT" = "true" ]; then
+			while [ "$partitionsCreated" != "true" ]; do		
+				deleteAllPartitions $hd
+				bash /tmp/newPartLayout
+				partprobe &>/dev/null
+				gptPartCount=$(gdisk -l $hd 2> /dev/null| awk '/^ / {print $1}' | grep -vi mbr | grep -vi gpt | grep -vi bsd | grep -vi apm -c)
+				if [ "$gptPartCount" = "$originalPartCount" ]; then
+					partitionsCreated=true
+					log " ...... Success" "display"
+				else
+					partCreatedCounter=$(( $partCreatedCounter + 1 ))
+					log " ...... Could Not Create Partition Layout.  Retrying Attempt $partCreatedCounter"
+					if [ "$partCreatedCounter" -gt "10" ]; then
+						createDynamic="false"
+					fi
+				fi
+			done
+		else
+			deleteAllPartitions $hd
+			bash /tmp/newPartLayout
+			partprobe &>/dev/null
+			mbrPartCount=$(fdisk -l 2>/dev/null | grep $hd | grep -v ${hd}: -c)
+			if [ "$mbrPartCount" != "$originalPartCount" ]; then
+				createDynamic="false"
+			fi
+		fi
+	fi
+	
+	log " ** New Partition Table Is ** "
+	if [ "$usingGPT" = "true" ]; then
+		gdisk -l $hd &>>/tmp/clientlog.log
+	else
+		fdisk -l &>>/tmp/clientlog.log
+	fi
+	
+	if [ "$minSizeResult" = "true" ] && [ "$createDynamic" = "false" ]; then
+		log " ...... Creation Of Dynamic Partitions Failed, Attempting Fall-back Method: Original"
+		originalHDSize=`curl -sSkL "${web}getHDParameter?imgName=$imgName&paramName=originalHDSize&hdToGet=$hdToGet&partNumber=0" --connect-timeout 10 --stderr -`
+		drive=$(echo $hd | cut -d "/" -f 3)
+		lbs=$(cat /sys/block/$drive/queue/logical_block_size)
+		dsize=$(cat /sys/block/$drive/size)
+		thisHDSize=`expr $dsize '*' $lbs`;
+		log " ...... Original HD Size: $originalHDSize This HD Size: $thisHDSize"
+		if [ "$thisHDSize" -ge "$originalHDSize" ]; then
+			log " ...... Original MBR / GPT Appears To Work With This Drive, Continuing"
+			clearMBR
+			restoreMBR
+		else
+			log " ...... Fall-back Method: Original Failed.  Attempting Known Partition Layout Method"
+			isKnownLayout=`curl -sSkL "${web}getHDParameter?imgName=$imgName&paramName=isKnownLayout&hdToGet=$hdToGet&partNumber=0" --connect-timeout 10 --stderr -`
+			log " ...... isKnownLayout: $isKnownLayout"
+			if [ "$isKnownLayout" = "false" ]; then
+				error "Could Not Determine Any Partition Layout That Works With This Drive"
+			else
+				clearMBR
+				restoreMBR
+				log " ...... Appears To Be A Standard $isKnownLayout Image, Continuing"
+				log " ...... Modifying Layout To Fit This Drive"
+				curl -sSkL "${web}modifyKnownLayout?clientHD=$hd&layout=$isKnownLayout" --connect-timeout 10 --stderr - | dos2unix > /tmp/knownPartLayout
+				cat /tmp/knownPartLayout >> /tmp/clientlog.log
+				bash /tmp/knownPartLayout
+				partprobe &>/dev/null
+			fi
+		fi
+		
+		log " ** New Partition Table After Fall-Back Method Is* "
+		if [ "$usingGPT" = "true" ]; then
+			gdisk -l $hd &>>/tmp/clientlog.log
+		else
+			fdisk -l &>>/tmp/clientlog.log
+		fi
+	fi
+	
+	if [ "$multicast" = "true" ]; then
+		multicast
+	else
+		downloadImage
+	fi
+	
+	for part in $parts; do
+		fsType=`blkid -po udev $hd$part | grep FS_TYPE | awk -F'=' '{print $2}'`
+		expandFS $hd$part
+	done
+
+	
+	#Search For A Swap Partition
+	log " ** Searching For A Swap Partition ** "
+	searchSwapParts=$(partinfo --parts $hd 2>> /tmp/clientlog.log)
+	for part in $searchSwapParts; do
+		x=`echo $part | awk -F $hd ' {print $2}'`
+		isSwap=`blkid -po udev $part | grep swap`
+		if [ "$?" = "0" ]; then
+			log " ...... Found Swap On $part"
+			log "$isSwap"
+			swapUUID=`curl -sSkL "${web}getHDParameter?imgName=$imgName&paramName=uuid&hdToGet=$hdToGet&partNumber=$x" --connect-timeout 10 --stderr -`
+			mkswap $part -U $swapUUID &>> /tmp/clientlog.log
+		else
+			isSwap=$(fdisk -l 2>/dev/null | grep $part | grep -i swap)
+			if [ "$?" = "0" ]; then
+				log " ...... Found Swap On $part"
+				log "$isSwap"
+				swapUUID=`curl -sSkL "${web}getHDParameter?imgName=$imgName&paramName=uuid&hdToGet=$hdToGet&partNumber=$x" --connect-timeout 10 --stderr -`
+				mkswap $part -U $swapUUID &>> /tmp/clientlog.log
+			else
+				isSwap=$(gdisk -l $hd 2> /dev/null | grep " $x " | grep -i swap)
+				if [ "$?" = "0" ]; then
+					log " ...... Found Swap On $part"
+					log "$isSwap"
+					swapUUID=`curl -sSkL "${web}getHDParameter?imgName=$imgName&paramName=uuid&hdToGet=$hdToGet&partNumber=$x" --connect-timeout 10 --stderr -`
+					mkswap $part -U $swapUUID &>> /tmp/clientlog.log
+				else
+					log " ...... $part Is Not Swap"
+				fi
+			fi
+		fi
+	done
+	
+	if [ "$usingGPT" = "true" ]; then
+		log " ** Restoring GUID's ** "
+		hdgptGUID=`curl -sSkL "${web}getHDParameter?imgName=$imgName&paramName=HDguid&hdToGet=$hdToGet&partNumber=0" --connect-timeout 10 --stderr -`
+		log " ...... hd $hd hdgptGUID: $hdgptGUID "
+		sgdisk $hd -U$hdgptGUID &>> /tmp/clientlog.log
+		for part in $parts; do
+			gptGUID=`curl -sSkL "${web}getHDParameter?imgName=$imgName&paramName=guid&hdToGet=$hdToGet&partNumber=$part" --connect-timeout 10 --stderr -`
+			log " ...... part $part gptGUID: $gptGUID "
+			sgdisk $hd -u$part:$gptGUID &>> /tmp/clientlog.log
+		done
+	fi
+}
+
+function pushLVM()
+{
+	log " ** Checking For LVM To Restore ** "
+	if [ "$minSizeResult" = "original" ] || [ "$createDynamic" = "false" ]; then
+		curl -sSkL "${web}getOriginalLVM?imgName=$imgName&hdToGet=$hdToGet&clientHD=$hd" --connect-timeout 10 --stderr - | dos2unix > /tmp/lvmcommands
+		cat /tmp/lvmcommands >> /tmp/clientlog.log
+	fi
+	if [ -s "/tmp/lvmcommands" ]; then
+		lvmVGS=$(vgs --noheadings | awk '/^ / {print $1}')
+		for VG in $lvmVGS; do
+			vgremove $VG -fy
+		done
+	
+		lvmPVS=$(pvs --noheadings | grep $hd | awk '/^ / {print $1}')
+		for PV in $lvmPVS; do
+			pvremove $PV -fy
+		done
+	
+		bash /tmp/lvmcommands &>>/tmp/clientlog.log
+		vgscan
+		
+		lvmVGS=$(vgs --noheadings | awk '/^ / {print $1}')
+		for VG in $lvmVGS; do
+			lvmLVS=$(lvs | grep "$VG" | awk '/^ / {print $1}')
+			vgUUID=$(vgs -v  2>/dev/null | grep "$VG" | awk '/^ / {print $9}')
+			sed -i "s/$vgUUID/$(cat /tmp/vg-$VG)/g" /tmp/lvm-$VG 
+			for logical_volume in $lvmLVS; do		
+				lvUUID=`lvs -v 2>/dev/null | grep "$lvmVG" | grep "$logical_volume" | awk '/^ / {print $10}'`
+				sed -i "s/$lvUUID/$(cat /tmp/$VG-$logical_volume)/g" /tmp/lvm-$VG 
+			done
+			vgcfgrestore $VG -f /tmp/lvm-$VG
+		done
+					
+	else
+		return 0
+
+	fi
+	
+	log " ** Determining Number Of LV's To Restore ** "
+
+	parts=`curl -sSkL "${web}getHDParameter?imgName=$imgName&paramName=lvmactiveParts&hdToGet=$hdToGet&partNumber=0" --connect-timeout 10 --stderr -`
+	
+	partCount=0
+	for part in $parts; do
+		partCount=$(( $partCount + 1 ))
+	done
+	
+	log " ...... lvmpartCount: $partCount lvmparts: $parts"
+	
+	if [ "$partCount" = "0" ]; then
+		log "Did not find any LVs to restore"
+		return 0
+	fi
+	
+	
+	if [ "$multicast" = "true" ]; then
+		multicast "true"
+	else
+		downloadImage "true"
+	fi
+	
+	for part in $parts; do
+		lvHD="/dev/mapper/$part"
+		fsType=`blkid -po udev $lvHD | grep FS_TYPE | awk -F'=' '{print $2}'`
+		expandFS $lvHD
+	done
+
+	
+	#Search For A Swap Partition
+	log " ** Searching For A Swap Partition ** "
+	
+	swapResult=`curl -sSkL "${web}getHDParameter?imgName=$imgName&paramName=lvmswap&hdToGet=$hdToGet&partNumber=0" --connect-timeout 10 --stderr -`
+		
+	if [ -n "$swapResult" ]; then
+		arrayS=$(echo $swapResult | tr "," "\n");
+		i=0;
+		for x in $arrayS; do
+   			swapArray[i]=$x;
+			i=$(( $i + 1 ))
+		done
+
+		log " ...... Found Swap On /dev/mapper/${swapArray[0]}"
+		log "${swapArray[1]}"
+		mkswap /dev/mapper/${swapArray[0]} -U ${swapArray[1]} &> /tmp/makeswap
+		cat /tmp/makeswap >>/tmp/clientlog.log
+		mkswapResult=$(cat /tmp/makeswap | grep "parsing UUID failed")
+		if [ "$?" = "0" ]; then
+			log " ...... Swap Creation Failed, Creating Swap With New UUID "
+			mkswap /dev/mapper/${swapArray[0]} &>> /tmp/clientlog.log
+		fi
+	else
+		log " ...... No Swap Found"
+	fi
+
+	
+	
+}
+
+function pullGlobal()
+{
+	mkdir -p /mnt/ntfs &>/dev/null
+	
+	for part in $parts; do
+	    partNumber=`echo $part | awk -F $hd ' {print $2}'`
+		fsType=`blkid -po udev $part | grep FS_TYPE | awk -F'=' '{print $2}'`
+		
+		
+		if [ "$fsType" = "ntfs" ]; then
+			log " ** Clearing Mounted Devices On $part ** "
+			ntfs-3g -o force,rw $part /mnt/ntfs &>>/tmp/clientlog.log
+			reged -e /mnt/ntfs/Windows/System32/config/SYSTEM &>>/tmp/clientlog.log <<MOUNT
+cd \MountedDevices
+delallv
+q
+y
+MOUNT
+			umount /mnt/ntfs &> /dev/null
+		fi
+	done
+		log " ...... Complete"
+		
+	for part in $parts; do
+		x=`echo $part | awk -F $hd ' {print $2}'`
+		fsType=`blkid -po udev $hd$x | grep FS_TYPE | awk -F'=' '{print $2}'`
+		shrinkFS $hd$x
+	done
+		
+	uploadImage
+	clear
+	
+	for part in $parts; do
+		x=`echo $part | awk -F $hd ' {print $2}'`
+		fsType=`blkid -po udev $hd$x | grep FS_TYPE | awk -F'=' '{print $2}'`
+		expandFS $hd$x
+	done
+	
+	
+}
+
+function pullLVM()
+{
+	lvmVGS=$(pvs --noheadings | grep $hd | awk '/^ / {print $2}')
+	if [ "$?" != "0" ]; then
+		return 0
+	fi
+	
+	for VG in $lvmVGS; do
+		parts=""
+		lvmLVS=$(lvs --noheadings | grep $VG | awk '/^ / {print $1}')
+
+		for logical_volume in $lvmLVS; do
+			esVG=$(echo $lvmVG | sed 's/-/--/g')
+			esLV=$(echo $logical_volume | sed 's/-/--/g')
+			lvHD="/dev/mapper/$esVG-$esLV"
+			
+			parts="$parts $lvHD "
+			lvOut="$esVG-$esLV"
+			fsType=`blkid -po udev "$lvHD" | grep FS_TYPE | awk -F'=' '{print $2}'`
+			shrinkFS $lvHD
+		done
+						
+		uploadImage "true"
+	
+		clear
+		
+		for logical_volume in $lvmLVS; do	
+			esVG=$(echo $lvmVG | sed 's/-/--/g')
+			esLV=$(echo $logical_volume | sed 's/-/--/g')
+			lvHD="/dev/mapper/$esVG-$esLV"
+			lvOut="$esVG-$esLV"
+			fsType=`blkid -po udev "$lvHD" | grep FS_TYPE | awk -F'=' '{print $2}'`
+			expandFS $lvHD
+		done
+	done
+}
+
+function restoreMBR()
+{
+	log " ** Restoring MBR / GPT On $hd ** " "display"
+
+		if [ "$xferMode" = "nfs" ] || [ "$xferMode" = "smb" ]; then
+			dd if=/images/$imgPath/table of=$hd &>>/tmp/clientlog.log				
+		else		
+			curl -sSk -FserverKey="$(echo -n "$WDS_KEY" | base64)" -FimgName="$(echo -n $imgPath | base64)" -FpartName="$(echo -n table | base64)" "${web}downloadimage" --connect-timeout 10 | dd of=$hd &>>/tmp/clientlog.log
+		fi
+	
+		
+	log " ...... Complete" "display"
+	echo 
+	partprobe &>/dev/null
+	sleep 2
+}
+
+function restoreGrubLegacy()
+{
+	#Grub Legacy does not seem to restore properly, it must be reinstalled
+	#Does not seem to affect Grub2
+	log " ** Checking If Grub Is Required ** "
+	dd if=$hd of=/tmp/grubcheck bs=512 count=1 2> /dev/null
+	strings /tmp/grubcheck | grep -i "grub"
+	if [ "$?" = "0" ]; then
+		log " ...... Grub Is Required, Searching For Boot Files "
+		if [ -n "$grubRoot" ]; then
+			log " ...... Grub Root Overridden By User $grubRoot "
+			grubHD=$(echo $grubRoot | cut -d"," -f1)
+			grubHD="$grubHD)"
+		else
+			grub --batch <<eof>> /tmp/grubroot
+find /grub/menu.lst
+find /boot/grub/menu.lst
+eof
+			cat /tmp/grubroot >>/tmp/clientlog.log
+			grubHdPass=$(( $hdPass - 1 ))
+			grubRoot=$(cat /tmp/grubroot | grep -i "hd$grubHdPass")
+			grubHD=$(echo $grubRoot | cut -d"," -f1)
+			grubHD="$grubHD)"
+		fi
+			log "grubHdPass: $grubHdPass grubRoot: $grubRoot grubHD: $grubHD hdPass: $hdPass"
+		
+		if [ -n "$grubRoot" ]; then
+			log " ...... Found Legacy Grub On $grubRoot "
+			log " ...... Restoring Grub Legacy "
+			grub --batch <<eof>> /tmp/clientlog.log
+root $grubRoot
+setup $grubHD
+eof
+		else
+			log " ...... Could Not Find Boot Files For Grub Legacy.  This Is Normal If Grub2 Is Being Used."
+			log " Otherwise, You Need To Manually Set Grub Root Using The Host Argument grubRoot="
+		fi
+	else
+		log " ...... Grub Is Not Required"
+	fi
+}
+
+function runScripts()
+{
+	
+	mkdir /scripts
+	log " ** Running Script(s) ** " "display"
+	sleep 1
+	cd /scripts
+	arr=$(echo "$hostScripts" | tr "," "\n");
+	for script in $arr; do
+	
+		curl -sSk -FscriptName="$script" -FserverKey="$(echo -n "$WDS_KEY" | base64)" "${web}downloadcustomscripts" -o /scripts/"$script" --connect-timeout 10 --stderr - >> /tmp/clientlog.log
+		log " ...... Running $script" "display"
+		sleep 1
+		chmod +x "$script"
+		./$script "$hd" "$taskArgs"
+		sleep 1
+		echo
+	done
+}
+
+function shrinkFS()
+{
+	if [ "$noResize" != "true" ]; then
+		if [ "$fsType" = "ext2" ] || [ "$fsType" = "ext3" ] || [ "$fsType" = "ext4" ]; then
+			newextsize="";
+			log " ** Resizing EXT Filesystem On $1 (This May Take A Few Minutes) **" "display"
+			e2fsck -fp $1 &> /dev/null
+			extfssize=`resize2fs -P $1 2>/dev/null | awk -F': ' '{print $2}'`;
+			fsblksize=`dumpe2fs -h $1 2>/dev/null | grep "^Block size:" | awk '{print $3}'`;
+			minpartsize=`expr $extfssize '*' $fsblksize`;
+			newextsize=`expr $minpartsize '*' 103 '/' 100 '/' 1024 '/' 1024`; 
+	
+			resize2fs $1 ${newextsize}M &>> /tmp/clientlog.log
+
+			log " ...... extfssize: $extfssize fsblksize: $fsblksize minpartsize: $minpartsize"
+
+		elif [ "$fsType" = "ntfs" ]; then
+			log " ** Resizing NTFS Filesystem On $1 (This May Take A Few Minutes) **" "display"
+			ntfsfix -b -d $1 &>>/tmp/clientlog.log
+			ntfssize=`ntfsresize -f -i -P $1 | grep "bytes or" | cut -d" " -f8`;
+			newntfssize=`expr $ntfssize '*' 103 '/' 100`
+
+			ntfsresize -f -s ${newntfssize}M $1 &>> /tmp/clientlog.log << CONFIRM
+y
+CONFIRM
+			log " ...... ntfssize: $ntfssize"
+			
+			ntfsfix -b -d $1 &>>/tmp/clientlog.log
+		fi
+	fi
+}
+
+function downloadImage()
+{	
+	isLVM="$1"
+	clear
+	
+	if [ "$isLVM" = "true" ]; then
+		for lv in $parts; do
+		unesLV=$(echo $lv | sed 's/--/-/g')
+		log " ** Starting Image Download For Partition $unesLV ** " "display"
+		sleep 7
+		echo
+		
+		upPart=`curl -sSk "${web}updateprogresspartition?hostName=$hostName&partition=$unesLV" --connect-timeout 10 --stderr -`
+		
+		fsType=`ls /images/$imgPath | grep $unesLV | grep -o '\.[a-z]*\.' | sed 's/\.//g'`
+		isGzip=`ls /images/$imgPath | grep $unesLV | grep -i .gz`
+		isLz4=`ls /images/$imgPath | grep $unesLV | grep -i .lz4`
+		
+		log " ...... fsType: $fsType isGzip: $isGzip isLz4: $isLz4"
+		
+		if [ -n "$isGzip" ]; then
+			partCompAlg="/usr/bin/gzip -c -d"
+			partCompExt="gz"
+		elif [ -n "$isLz4" ]; then
+			partCompAlg="lz4 -d"
+			partCompExt="lz4"
+		else
+			error "Could Not Determine Compression Algorithm For Partition"
+		fi
+		
+		if [ -n "$fsType" ]; then
+
+			touch /tmp/clone.progress
+			
+			if [ "$xferMode" = "nfs" ] || [ "$xferMode" = "smb" ]; then
+				log "reporter $hostName $web & $partCompAlg /images/$imgPath/$unesLV.$fsType.$partCompExt | partclone.$fsType -B -r -o /dev/mapper/$lv"
+				reporter $hostName $web & $partCompAlg /images/$imgPath/$unesLV.$fsType.$partCompExt | partclone.$fsType -B -r -o /dev/mapper/$lv		
+			else
+				log "reporter $hostName $web & curl -sSk -FserverKey=\"$(echo -n "$WDS_KEY" | base64)\" -FimgName=\"$(echo -n $imgPath | base64)\" -FpartName=\"$(echo -n $unesLV.$fsType.$partCompExt | base64)\" \"${web}downloadimage\" | $partCompAlg | partclone.$fsType -B -r -o /dev/mapper/$lv"
+				reporter $hostName $web & curl -sSk -FserverKey="$(echo -n "$WDS_KEY" | base64)" -FimgName="$(echo -n $imgPath | base64)" -FpartName="$(echo -n $unesLV.$fsType.$partCompExt | base64)" "${web}downloadimage" | $partCompAlg | partclone.$fsType -B -r -o /dev/mapper/$lv	
+			fi
+			
+		fi
+
+		rm /tmp/clone.progress
+		cat /var/log/partclone.log >> /tmp/clientlog.log
+		clear
+	done
+	else
+	
+	for x in $parts; do
+		log " ** Starting Image Download For Partition $hd$x ** " "display"
+		sleep 7
+		echo
+		
+		upPart=`curl -sSk "${web}updateprogresspartition?hostName=$hostName&partition=$hd$x" --connect-timeout 10 --stderr -`
+		
+		fsType=`ls /images/$imgPath | grep part$x | grep -o '\.[a-z]*\.' | sed 's/\.//g'`
+		isGzip=`ls /images/$imgPath | grep part$x | grep -i .gz`
+		isLz4=`ls /images/$imgPath | grep part$x | grep -i .lz4`
+		
+		log " ...... fsType: $fsType isGzip: $isGzip isLz4: $isLz4"
+		
+		if [ -n "$isGzip" ]; then
+			partCompAlg="/usr/bin/gzip -c -d"
+			partCompExt="gz"
+		elif [ -n "$isLz4" ]; then
+			partCompAlg="lz4 -d"
+			partCompExt="lz4"
+		else
+			error "Could Not Determine Compression Algorithm For Partition"
+		fi
+		
+		if [ -n "$fsType" ]; then
+
+			touch /tmp/clone.progress
+			
+			if [ "$xferMode" = "nfs" ] || [ "$xferMode" = "smb" ]; then
+				log "reporter $hostName $web & $partCompAlg /images/$imgPath/part$x.$fsType.$partCompExt | partclone.$fsType -B -r -o $hd$x"
+				reporter $hostName $web & $partCompAlg /images/$imgPath/part$x.$fsType.$partCompExt | partclone.$fsType -B -r -o $hd$x			
+			else
+				log "reporter $hostName $web & curl -sSk -FserverKey=\"$(echo -n "$WDS_KEY" | base64)\" -FimgName=\"$(echo -n $imgPath | base64)\" -FpartName=\"$(echo -n part$x.$fsType.$partCompExt | base64)\" \"${web}downloadimage\" | $partCompAlg | partclone.$fsType -B -r -o $hd$x"
+				reporter $hostName $web & curl -sSk -FserverKey="$(echo -n "$WDS_KEY" | base64)" -FimgName="$(echo -n $imgPath | base64)" -FpartName="$(echo -n part$x.$fsType.$partCompExt | base64)" "${web}downloadimage" | $partCompAlg | partclone.$fsType -B -r -o $hd$x		
+			fi
+			
+		fi
+
+		rm /tmp/clone.progress
+		cat /var/log/partclone.log >> /tmp/clientlog.log
+		clear
+	done
+	fi
+}
+
+
+function uploadImage()
+{
+	isLVM="$1"
+	clear
+	for part in $parts; do
+		log " ** Starting Image Upload For Partition $part ** " "display" 
+		sleep 7
+		echo
+		
+		if [ "$compAlg" = "lz4" ]; then
+			compExt="lz4"
+		elif [ "$compAlg" = "gzip" ] || [ "$compAlg" = "/usr/bin/gzip" ]; then
+			compAlg="/usr/bin/gzip"
+			compExt="gz"
+		else
+			error "Could Not Determine Current Compression Algorithm $compAlg"
+		fi
+
+		if [ "$isLVM" = "true" ]; then
+			partNumber=`echo $part | sed 's/\/dev\/mapper\///g'`
+		else
+			partNumber=`echo $part | awk -F $hd ' {print $2}'`		
+		fi
+		
+	    upPart=`curl -sSk "${web}updateprogresspartition?hostName=$hostName&partition=$part" --connect-timeout 10 --stderr -`		
+		fsType=`blkid -po udev $part | grep FS_TYPE | awk -F'=' '{print $2}'`
+
+		log " ...... partNumber: $partNumber fsType: $fsType"
+		
+		if [ "$fsType" = "ntfs" ]; then		
+			partCloneType="ntfs"
+		
+		elif [ "$fsType" = "vfat" ]; then
+			partCloneType="fat"
+			
+		elif [ "$fsType" = "ext2" ] || [ "$fsType" = "ext3" ] || [ "$fsType" = "ext4" ]; then
+			partCloneType="extfs"
+
+		elif [ "$fsType" = "hfsplus" ]; then
+			partCloneType="hfsp"
+			
+		elif [ "$fsType" = "swap" ]; then
+			log " ...... $part Is A Swap Partition.  Skipping." "display"
+			sleep 2
+			clear
+			continue	
+		else
+			if [ "$isLVM" != "true" ]; then
+				fsid=$(sfdisk -c $hd $partNumber 2>> /tmp/clientlog.log)
+				gfsid=$(gdisk $hd -l | grep " $partNumber " | awk '/^ / {print $6}')
+			
+				if [ "$fsid" = "8e" ] || [ "$gfsid" = "8E00" ]; then
+					if [ "$lvmResize" != "false" ]; then
+						log " ...... $part Is An LVM Physical Partition.  Skipping." "display"
+						log " ...... Logical Volumes Will Be Uploaded Last." "display"
+						sleep 5
+						clear
+						continue
+					fi
+				fi
+				
+				if [ "$fsid" = "5" ] || [ "$fsid" = "f" ] ; then
+						log " ...... $part Is An Extended Partition.  Skipping." "display"
+						sleep 2
+						clear
+						continue
+				fi
+			fi
+			
+			partCloneType="imager"
+		fi
+		
+		touch /tmp/clone.progress
+		
+		if [ "$isLVM" = "true" ]; then
+			unesImageOut=$(echo $partNumber | sed 's/--/-/g')
+			if [ "$xferMode" = "nfs" ] || [ "$xferMode" = "nfs+http" ] || [ "$xferMode" = "smb" ] || [ "$xferMode" = "smb+http" ]; then	
+				log " ...... reporter $hostName $web & partclone.$partCloneType -B -c -s $part | $compAlg $compLevel -c > /images/$imgPath/$unesImageOut.$partCloneType.$compExt"		
+				reporter $hostName $web & partclone.$partCloneType -B -c -s $part | $compAlg $compLevel -c > /images/$imgPath/$unesImageOut.$partCloneType.$compExt
+			
+			else
+				log " ...... reporter $hostName $web & partclone.$partCloneType -B -c -s $part | udp-sender --no-progress --min-receivers 1 --pointopoint --nokbd --ttl 32 --portbase $portBase --start-timeout 30"
+				reporter $hostName $web & partclone.$partCloneType -B -c -s $part | udp-sender --no-progress --min-receivers 1 --pointopoint --nokbd --ttl 32 --portbase $portBase --start-timeout 30 &
+				udpPID=$!
+				receiverStat=`curl -sSk -FserverKey="$(echo -n "$WDS_KEY" | base64)" -FimgPath="$(echo -n $imgPath/$unesImageOut.$partCloneType | base64)" -FportBase="$(echo -n $portBase | base64)" "${web}startreceiver" --connect-timeout 10 --stderr -`
+				log " ...... $receiverStat"
+				wait $udpPID			
+			fi
+		else
+		
+			if [ "$xferMode" = "nfs" ] || [ "$xferMode" = "nfs+http" ] || [ "$xferMode" = "smb" ] || [ "$xferMode" = "smb+http" ]; then	
+				log " ...... reporter $hostName $web & partclone.$partCloneType -B -c -s $hd$partNumber | $compAlg $compLevel -c > /images/$imgPath/part$partNumber.$partCloneType.$compExt"		
+				reporter $hostName $web & partclone.$partCloneType -B -c -s $hd$partNumber | $compAlg $compLevel -c > /images/$imgPath/part$partNumber.$partCloneType.$compExt
+			
+			else
+				log " ...... reporter $hostName $web & partclone.$partCloneType -B -c -s $hd$partNumber | udp-sender --no-progress --min-receivers 1 --pointopoint --nokbd --ttl 32 --portbase $portBase --start-timeout 30"
+				reporter $hostName $web & partclone.$partCloneType -B -c -s $hd$partNumber | udp-sender --no-progress --min-receivers 1 --pointopoint --nokbd --ttl 32 --portbase $portBase --start-timeout 30 &
+				udpPID=$!
+				receiverStat=`curl -sSk -FserverKey="$(echo -n "$WDS_KEY" | base64)" -FimgPath="$(echo -n $imgPath/part$partNumber.$partCloneType | base64)" -FportBase="$(echo -n $portBase | base64)" "${web}startreceiver" --connect-timeout 10 --stderr -`
+				log " ...... $receiverStat"
+				wait $udpPID			
+			fi
+		fi
+		rm /tmp/clone.progress
+		cat /var/log/partclone.log >> /tmp/clientlog.log
+		clear
+	done
+}
+
