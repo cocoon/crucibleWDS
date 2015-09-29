@@ -156,6 +156,7 @@
 		</div>
 		<div class="size-setting column">
 			<asp:DropDownList ID="ddlCompAlg" runat="server" CssClass="ddlist">
+        			<asp:ListItem>none</asp:ListItem>
 				<asp:ListItem>gzip</asp:ListItem>
 				<asp:ListItem>lz4</asp:ListItem>
 			</asp:DropDownList>

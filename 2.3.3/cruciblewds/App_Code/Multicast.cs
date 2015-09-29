@@ -581,34 +581,37 @@ public class Multicast
 
         try
         {
-            partFiles = Directory.GetFiles(fullImagePath + Path.DirectorySeparatorChar, "*.gz*");
-            if (partFiles.Length == 0)
+            // modified by cocoon
+            string[] ImageExtensions = new string[3] { ".gz", ".lz4", ".none" }; // modified by cocoon
+
+            foreach (var ext in ImageExtensions)
             {
-                partFiles = Directory.GetFiles(fullImagePath + Path.DirectorySeparatorChar, "*.lz4*");
-                if (partFiles.Length == 0)
+                partFiles = Directory.GetFiles(fullImagePath + Path.DirectorySeparatorChar, "*" + ext);
+                if (partFiles != null && partFiles.Length > 0)
                 {
-                    Utility.Message = "Image Files Could Not Be Located";
-                    return false;
-                }
-                else
-                {
-                    if (Environment.OSVersion.ToString().Contains("Unix"))
-                        compAlg = "lz4 -d ";
+                    compExt = ext;
+                    if (compExt == ".lz4")
+                    {
+                        compAlg = Environment.OSVersion.ToString().Contains("Unix") ? "lz4 -d " : "lz4.exe -d ";
+                        stdout = " - ";
+                    }
+                    else if (compExt == ".gz")
+                    {
+                        compAlg = Environment.OSVersion.ToString().Contains("Unix") ? "gzip -c -d " : "gzip.exe -c -d ";
+                        stdout = "";
+                    }
                     else
-                        compAlg = "lz4.exe -d ";
-                    compExt = ".lz4";
-                    stdout = " - ";
+                    {
+                        compAlg = Environment.OSVersion.ToString().Contains("Unix") ? "cat " : "type ";
+			stdout = "";
+                    }
+                    break;
                 }
             }
-            else
+            if (partFiles.Length == 0)
             {
-                if (Environment.OSVersion.ToString().Contains("Unix"))
-                    compAlg = "gzip -c -d ";
-                else
-                    compAlg = "gzip.exe -c -d ";
-                
-                compExt = ".gz";
-                stdout = "";
+               	Utility.Message = "Image Files Could Not Be Located"; 
+		return false;
             }
         }       
         catch
@@ -840,36 +843,39 @@ public class Multicast
 
         try
         {
-            partFiles = Directory.GetFiles(multicast.GroupImage + Path.DirectorySeparatorChar, "*.gz*");
+            // modified by cocoon
+            string[] ImageExtensions = new string[3] { ".gz", ".lz4", ".none" }; // modified by cocoon
+
+            foreach (var ext in ImageExtensions)
+            {
+                partFiles = Directory.GetFiles(multicast.GroupImage + Path.DirectorySeparatorChar, "*" + ext);
+                if (partFiles != null && partFiles.Length > 0)
+                {
+                    compExt = ext;
+                    if (compExt == ".lz4")
+                    {
+                        compAlg = Environment.OSVersion.ToString().Contains("Unix") ? "lz4 -d " : "lz4.exe -d ";
+                        stdout = " - ";
+                    }
+                    else if (compExt == ".gz")
+                    {
+                        compAlg = Environment.OSVersion.ToString().Contains("Unix") ? "gzip -c -d " : "gzip.exe -c -d ";
+                        stdout = "";
+                    }
+                    else
+                    {
+			compAlg = Environment.OSVersion.ToString().Contains("Unix") ? "cat " : "type ";
+			stdout = "";
+                    }
+                    break;
+                }
+            }
             if (partFiles.Length == 0)
             {
-                partFiles = Directory.GetFiles(multicast.GroupImage + Path.DirectorySeparatorChar, "*.lz4*");
-                if (partFiles.Length == 0)
-                {
-                    Utility.Message = "Image Files Could Not Be Located";
-                    return false;
-                }
-                else
-                {
-                    if (Environment.OSVersion.ToString().Contains("Unix"))
-                        compAlg = "lz4 -d ";
-                    else
-                        compAlg = "lz4.exe -d ";
-                    compExt = ".lz4";
-                    stdout = " - ";
-                }
-            }
-            else
-            {
-                if (Environment.OSVersion.ToString().Contains("Unix"))
-                    compAlg = "gzip -c -d ";
-                else
-                    compAlg = "gzip.exe -c -d ";
-
-                compExt = ".gz";
-                stdout = "";
-            }
-        }       
+                Utility.Message = "Image Files Could Not Be Located";
+		return false;
+            } 
+	}       
         catch
         {
             Utility.Message = "Image Files Could Not Be Located";

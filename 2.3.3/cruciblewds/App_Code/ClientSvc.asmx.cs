@@ -23,6 +23,9 @@ namespace CrucibleWDS
 
     public class ClientSvc : System.Web.Services.WebService
     {
+        string[] ImageExtensions = new string[3] { ".gz", ".lz4", ".none" }; // modified by cocoon
+        string[] ImagePartTypes = new string[5] { ".ntfs", ".fat", ".extfs",".hfsp", ".imager" }; // modified by cocoon
+
         #region On Demand
 
          [WebMethod]
@@ -379,10 +382,34 @@ namespace CrucibleWDS
                     string compAlgorithm = utility.GetSettings("Compression Algorithm");
                     imagePath = imagePath.Replace('/', Path.DirectorySeparatorChar);
                     string compExt = null;
+
+                // modified by cocoon^M
+                    /*
                     if (compAlgorithm == "lz4")
                         compExt = ".lz4";
                     else
                         compExt = ".gz";
+                    */
+                    switch (compAlgorithm)
+                    {
+                        case "lz4":
+                            compExt = ".lz4";
+                            break;
+
+                        case "gzip":
+                            compExt = ".gz";
+                            break;
+
+                        case "none":
+                            compExt = ".none";
+                            break;
+
+                        default:
+                            compExt = ".gz";
+                            break;
+                    }
+
+
 
                     string shell = null;
 
@@ -417,16 +444,36 @@ namespace CrucibleWDS
                     ProcessStartInfo receiverInfo = new ProcessStartInfo();
                     receiverInfo.FileName = (shell);
 
+                    // modified by cocoon
                     if (Environment.OSVersion.ToString().Contains("Unix"))
                     {
-                        receiverInfo.Arguments = (" -c \"" + "udp-receiver" + " --portbase " + port + " " + utility.GetSettings("Receiver Args") + " --start-timeout 30 | " +
-                            " " + compAlgorithm + " -" + utility.GetSettings("Compression Level") + " > " + utility.GetSettings("Image Store Path") + imagePath + compExt +"\"");
+                        if (compExt == ".none")
+                        {
+                            receiverInfo.Arguments = (" -c \"" + "udp-receiver" + " --portbase " + port + " " + 
+                                utility.GetSettings("Receiver Args") + " --start-timeout 30 --file " + 
+                                utility.GetSettings("Image Store Path") + imagePath + compExt + "\"");
+                        }
+                        else
+                        {
+                            receiverInfo.Arguments = (" -c \"" + "udp-receiver" + " --portbase " + port + " " + 
+                                utility.GetSettings("Receiver Args") + " --start-timeout 30 | " + " " + compAlgorithm + " -" + 
+                                utility.GetSettings("Compression Level") + " > " + 
+                                utility.GetSettings("Image Store Path") + imagePath + compExt + "\"");
+                        }
 
                     }
                     else
                     {
-                        receiverInfo.Arguments = (" /c " + appPath + "udp-receiver.exe" + " --portbase " + port + " " + utility.GetSettings("Receiver Args") + " --start-timeout 30 | " +
-                            appPath + compAlgorithm + " -" + utility.GetSettings("Compression Level") + " > " + utility.GetSettings("Image Store Path") + imagePath + compExt);
+                        if (compExt == ".none")
+                        {
+                            receiverInfo.Arguments = (" /c " + appPath + "udp-receiver.exe" + " --portbase " + port + " " + utility.GetSettings("Receiver Args") + " --start-timeout 30 --file " + 
+                                utility.GetSettings("Image Store Path") + imagePath + compExt);
+                        }
+                        else
+                        {
+                            receiverInfo.Arguments = (" /c " + appPath + "udp-receiver.exe" + " --portbase " + port + " " + utility.GetSettings("Receiver Args") + " --start-timeout 30 | " +
+                                appPath + compAlgorithm + " -" + utility.GetSettings("Compression Level") + " > " + utility.GetSettings("Image Store Path") + imagePath + compExt);
+                        }
                     }
 
                     string log = ("\r\n" + DateTime.Now.ToString("MM.dd.yy hh:mm") + " Starting Unicast Upload " + imagePath +
@@ -794,22 +841,19 @@ namespace CrucibleWDS
 
                         try
                         {
-                            partFiles = Directory.GetFiles(imageFiles + Path.DirectorySeparatorChar, "*.gz*");
-                            if (partFiles.Length == 0)
+                            // modified by cocoon^M
+                            foreach (var ext in ImageExtensions)
                             {
-                                partFiles = Directory.GetFiles(imageFiles + Path.DirectorySeparatorChar, "*.lz4*");
-                                if (partFiles.Length == 0)
+                                partFiles = Directory.GetFiles(imageFiles + Path.DirectorySeparatorChar, "*" + ext);
+                                if (partFiles != null && partFiles.Length > 0)
                                 {
-                                    Logger.Log("Image Files Could Not Be Located");
-                                }
-                                else
-                                {
-                                    compExt = ".lz4";
+                                    compExt = ext;
+                                    break;
                                 }
                             }
-                            else
+                            if (partFiles.Length == 0)
                             {
-                                compExt = ".gz";
+                                Logger.Log("Image Files Could Not Be Located");
                             }
                         }
                         catch
@@ -817,16 +861,15 @@ namespace CrucibleWDS
                             Logger.Log("Image Files Could Not Be Located");
                         }
 
-                        if (File.Exists(imageFiles + Path.DirectorySeparatorChar + "part" + part.number + ".ntfs" + compExt))
-                            parts += part.number + " ";
-                        else if (File.Exists(imageFiles + Path.DirectorySeparatorChar + "part" + part.number + ".fat" + compExt))
-                            parts += part.number + " ";
-                        else if (File.Exists(imageFiles + Path.DirectorySeparatorChar + "part" + part.number + ".extfs" + compExt))
-                            parts += part.number + " ";
-                        else if (File.Exists(imageFiles + Path.DirectorySeparatorChar + "part" + part.number + ".hfsp" + compExt))
-                            parts += part.number + " ";
-                        else if (File.Exists(imageFiles + Path.DirectorySeparatorChar + "part" + part.number + ".imager" + compExt))
-                            parts += part.number + " ";   
+                        // modified by cocoon^M
+                        foreach (var pType in ImagePartTypes)
+                        {
+                            if (File.Exists(imageFiles + Path.DirectorySeparatorChar + "part" + part.number + pType + compExt))
+                            {
+                                parts += part.number + " ";
+                                break;
+                            }
+                        }
                     }
                 }
                 HttpContext.Current.Response.Write(parts);
@@ -849,23 +892,20 @@ namespace CrucibleWDS
 
                     try
                     {
-                        partFiles = Directory.GetFiles(imageFiles + Path.DirectorySeparatorChar, "*.gz*");
-                        if (partFiles.Length == 0)
-                        {
-                            partFiles = Directory.GetFiles(imageFiles + Path.DirectorySeparatorChar, "*.lz4*");
+                            // modified by cocoon
+                            foreach (var ext in ImageExtensions)
+                            {
+                                partFiles = Directory.GetFiles(imageFiles + Path.DirectorySeparatorChar, "*" + ext);
+                                if (partFiles != null && partFiles.Length > 0)
+                                {
+                                    compExt = ext;
+                                    break;
+                                }
+                            }
                             if (partFiles.Length == 0)
                             {
                                 Logger.Log("Image Files Could Not Be Located");
                             }
-                            else
-                            {
-                                compExt = ".lz4";
-                            }
-                        }
-                        else
-                        {
-                            compExt = ".gz";
-                        }
                     }
                     catch
                     {
@@ -880,16 +920,15 @@ namespace CrucibleWDS
                                 if (lv.active == "1")
                                 {
 
-                                    if (File.Exists(imageFiles + Path.DirectorySeparatorChar + lv.vg + "-" + lv.name + ".ntfs" + compExt))
-                                        parts += lv.vg + "-" + lv.name + " ";
-                                    else if (File.Exists(imageFiles + Path.DirectorySeparatorChar + lv.vg + "-" + lv.name + ".fat" + compExt))
-                                        parts += lv.vg + "-" + lv.name + " ";
-                                    else if (File.Exists(imageFiles + Path.DirectorySeparatorChar + lv.vg + "-" + lv.name + ".extfs" + compExt))
-                                        parts += lv.vg.Replace("-","--") + "-" + lv.name.Replace("-","--") + " ";
-                                    else if (File.Exists(imageFiles + Path.DirectorySeparatorChar + lv.vg + "-" + lv.name + ".hfsp" + compExt))
-                                        parts += lv.vg + "-" + lv.name + " ";
-                                    else if (File.Exists(imageFiles + Path.DirectorySeparatorChar + lv.vg + "-" + lv.name + ".imager" + compExt))
-                                        parts += lv.vg + "-" + lv.name + " ";
+                                    // modified by cocoon
+                                    foreach (var pType in ImagePartTypes)
+                                    {
+                                        if (File.Exists(imageFiles + Path.DirectorySeparatorChar + lv.vg + "-" + lv.name + pType + compExt))
+                                        {
+                                            parts += lv.vg + "-" + lv.name + " ";
+                                            break;
+                                        }
+                                    }
                                 }
                             }
                         }

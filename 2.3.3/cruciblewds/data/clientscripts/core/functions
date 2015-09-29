@@ -1712,8 +1712,9 @@ function downloadImage()
 		fsType=`ls /images/$imgPath | grep $unesLV | grep -o '\.[a-z]*\.' | sed 's/\.//g'`
 		isGzip=`ls /images/$imgPath | grep $unesLV | grep -i .gz`
 		isLz4=`ls /images/$imgPath | grep $unesLV | grep -i .lz4`
+    isNone=`ls /images/$imgPath | grep $unesLV | grep -i .none`
 		
-		log " ...... fsType: $fsType isGzip: $isGzip isLz4: $isLz4"
+		log " ...... fsType: $fsType isGzip: $isGzip isLz4: $isLz4 isNone: $isNone"
 		
 		if [ -n "$isGzip" ]; then
 			partCompAlg="/usr/bin/gzip -c -d"
@@ -1721,7 +1722,10 @@ function downloadImage()
 		elif [ -n "$isLz4" ]; then
 			partCompAlg="lz4 -d"
 			partCompExt="lz4"
-		else
+		elif [ -n "$isNone" ]; then
+			partCompAlg="none"
+			partCompExt="none"
+    else
 			error "Could Not Determine Compression Algorithm For Partition"
 		fi
 		
@@ -1733,8 +1737,13 @@ function downloadImage()
 				log "reporter $hostName $web & $partCompAlg /images/$imgPath/$unesLV.$fsType.$partCompExt | partclone.$fsType -B -r -o /dev/mapper/$lv"
 				reporter $hostName $web & $partCompAlg /images/$imgPath/$unesLV.$fsType.$partCompExt | partclone.$fsType -B -r -o /dev/mapper/$lv		
 			else
-				log "reporter $hostName $web & curl -sSk -FserverKey=\"$(echo -n "$WDS_KEY" | base64)\" -FimgName=\"$(echo -n $imgPath | base64)\" -FpartName=\"$(echo -n $unesLV.$fsType.$partCompExt | base64)\" \"${web}downloadimage\" | $partCompAlg | partclone.$fsType -B -r -o /dev/mapper/$lv"
-				reporter $hostName $web & curl -sSk -FserverKey="$(echo -n "$WDS_KEY" | base64)" -FimgName="$(echo -n $imgPath | base64)" -FpartName="$(echo -n $unesLV.$fsType.$partCompExt | base64)" "${web}downloadimage" | $partCompAlg | partclone.$fsType -B -r -o /dev/mapper/$lv	
+        if [ "$partCompAlg" = "none" ]; then
+          log "reporter $hostName $web & curl -sSk -FserverKey=\"$(echo -n "$WDS_KEY" | base64)\" -FimgName=\"$(echo -n $imgPath | base64)\" -FpartName=\"$(echo -n $unesLV.$fsType.$partCompExt | base64)\" \"${web}downloadimage\" | partclone.$fsType -B -r -o /dev/mapper/$lv"
+				  reporter $hostName $web & curl -sSk -FserverKey="$(echo -n "$WDS_KEY" | base64)" -FimgName="$(echo -n $imgPath | base64)" -FpartName="$(echo -n $unesLV.$fsType.$partCompExt | base64)" "${web}downloadimage" | partclone.$fsType -B -r -o /dev/mapper/$lv
+        else
+				  log "reporter $hostName $web & curl -sSk -FserverKey=\"$(echo -n "$WDS_KEY" | base64)\" -FimgName=\"$(echo -n $imgPath | base64)\" -FpartName=\"$(echo -n $unesLV.$fsType.$partCompExt | base64)\" \"${web}downloadimage\" | $partCompAlg | partclone.$fsType -B -r -o /dev/mapper/$lv"
+				  reporter $hostName $web & curl -sSk -FserverKey="$(echo -n "$WDS_KEY" | base64)" -FimgName="$(echo -n $imgPath | base64)" -FpartName="$(echo -n $unesLV.$fsType.$partCompExt | base64)" "${web}downloadimage" | $partCompAlg | partclone.$fsType -B -r -o /dev/mapper/$lv
+        fi
 			fi
 			
 		fi
@@ -1755,8 +1764,9 @@ function downloadImage()
 		fsType=`ls /images/$imgPath | grep part$x | grep -o '\.[a-z]*\.' | sed 's/\.//g'`
 		isGzip=`ls /images/$imgPath | grep part$x | grep -i .gz`
 		isLz4=`ls /images/$imgPath | grep part$x | grep -i .lz4`
+    isNone=`ls /images/$imgPath | grep part$x | grep -i .none`
 		
-		log " ...... fsType: $fsType isGzip: $isGzip isLz4: $isLz4"
+		log " ...... fsType: $fsType isGzip: $isGzip isLz4: $isLz4 isNone: $isNone"
 		
 		if [ -n "$isGzip" ]; then
 			partCompAlg="/usr/bin/gzip -c -d"
@@ -1764,7 +1774,10 @@ function downloadImage()
 		elif [ -n "$isLz4" ]; then
 			partCompAlg="lz4 -d"
 			partCompExt="lz4"
-		else
+		elif [ -n "$isNone" ]; then
+			partCompAlg="none"
+			partCompExt="none"
+    else
 			error "Could Not Determine Compression Algorithm For Partition"
 		fi
 		
@@ -1776,8 +1789,13 @@ function downloadImage()
 				log "reporter $hostName $web & $partCompAlg /images/$imgPath/part$x.$fsType.$partCompExt | partclone.$fsType -B -r -o $hd$x"
 				reporter $hostName $web & $partCompAlg /images/$imgPath/part$x.$fsType.$partCompExt | partclone.$fsType -B -r -o $hd$x			
 			else
-				log "reporter $hostName $web & curl -sSk -FserverKey=\"$(echo -n "$WDS_KEY" | base64)\" -FimgName=\"$(echo -n $imgPath | base64)\" -FpartName=\"$(echo -n part$x.$fsType.$partCompExt | base64)\" \"${web}downloadimage\" | $partCompAlg | partclone.$fsType -B -r -o $hd$x"
-				reporter $hostName $web & curl -sSk -FserverKey="$(echo -n "$WDS_KEY" | base64)" -FimgName="$(echo -n $imgPath | base64)" -FpartName="$(echo -n part$x.$fsType.$partCompExt | base64)" "${web}downloadimage" | $partCompAlg | partclone.$fsType -B -r -o $hd$x		
+        if [ "$partCompAlg" = "none" ]; then
+          log "reporter $hostName $web & curl -sSk -FserverKey=\"$(echo -n "$WDS_KEY" | base64)\" -FimgName=\"$(echo -n $imgPath | base64)\" -FpartName=\"$(echo -n part$x.$fsType.$partCompExt | base64)\" \"${web}downloadimage\" | partclone.$fsType -B -r -o $hd$x"
+				  reporter $hostName $web & curl -sSk -FserverKey="$(echo -n "$WDS_KEY" | base64)" -FimgName="$(echo -n $imgPath | base64)" -FpartName="$(echo -n part$x.$fsType.$partCompExt | base64)" "${web}downloadimage" | partclone.$fsType -B -r -o $hd$x        
+        else
+				  log "reporter $hostName $web & curl -sSk -FserverKey=\"$(echo -n "$WDS_KEY" | base64)\" -FimgName=\"$(echo -n $imgPath | base64)\" -FpartName=\"$(echo -n part$x.$fsType.$partCompExt | base64)\" \"${web}downloadimage\" | $partCompAlg | partclone.$fsType -B -r -o $hd$x"
+				  reporter $hostName $web & curl -sSk -FserverKey="$(echo -n "$WDS_KEY" | base64)" -FimgName="$(echo -n $imgPath | base64)" -FpartName="$(echo -n part$x.$fsType.$partCompExt | base64)" "${web}downloadimage" | $partCompAlg | partclone.$fsType -B -r -o $hd$x
+        fi		
 			fi
 			
 		fi
@@ -1804,6 +1822,9 @@ function uploadImage()
 		elif [ "$compAlg" = "gzip" ] || [ "$compAlg" = "/usr/bin/gzip" ]; then
 			compAlg="/usr/bin/gzip"
 			compExt="gz"
+		elif [ "$compAlg" = "none" ]; then
+			compAlg="none"
+			compExt="none"
 		else
 			error "Could Not Determine Current Compression Algorithm $compAlg"
 		fi
@@ -1867,9 +1888,14 @@ function uploadImage()
 		if [ "$isLVM" = "true" ]; then
 			unesImageOut=$(echo $partNumber | sed 's/--/-/g')
 			if [ "$xferMode" = "nfs" ] || [ "$xferMode" = "nfs+http" ] || [ "$xferMode" = "smb" ] || [ "$xferMode" = "smb+http" ]; then	
-				log " ...... reporter $hostName $web & partclone.$partCloneType -B -c -s $part | $compAlg $compLevel -c > /images/$imgPath/$unesImageOut.$partCloneType.$compExt"		
-				reporter $hostName $web & partclone.$partCloneType -B -c -s $part | $compAlg $compLevel -c > /images/$imgPath/$unesImageOut.$partCloneType.$compExt
-			
+				if [ "$compAlg" = "none" ]; then
+          log " ...... reporter $hostName $web & partclone.$partCloneType -B -c -s $part -o /images/$imgPath/$unesImageOut.$partCloneType.$compExt"		
+				  reporter $hostName $web & partclone.$partCloneType -B -c -s $part -o /images/$imgPath/$unesImageOut.$partCloneType.$compExt
+        else
+          log " ...... reporter $hostName $web & partclone.$partCloneType -B -c -s $part | $compAlg $compLevel -c > /images/$imgPath/$unesImageOut.$partCloneType.$compExt"		
+				  reporter $hostName $web & partclone.$partCloneType -B -c -s $part | $compAlg $compLevel -c > /images/$imgPath/$unesImageOut.$partCloneType.$compExt
+			  fi
+      
 			else
 				log " ...... reporter $hostName $web & partclone.$partCloneType -B -c -s $part | udp-sender --no-progress --min-receivers 1 --pointopoint --nokbd --ttl 32 --portbase $portBase --start-timeout 30"
 				reporter $hostName $web & partclone.$partCloneType -B -c -s $part | udp-sender --no-progress --min-receivers 1 --pointopoint --nokbd --ttl 32 --portbase $portBase --start-timeout 30 &
@@ -1880,9 +1906,14 @@ function uploadImage()
 			fi
 		else
 		
-			if [ "$xferMode" = "nfs" ] || [ "$xferMode" = "nfs+http" ] || [ "$xferMode" = "smb" ] || [ "$xferMode" = "smb+http" ]; then	
-				log " ...... reporter $hostName $web & partclone.$partCloneType -B -c -s $hd$partNumber | $compAlg $compLevel -c > /images/$imgPath/part$partNumber.$partCloneType.$compExt"		
-				reporter $hostName $web & partclone.$partCloneType -B -c -s $hd$partNumber | $compAlg $compLevel -c > /images/$imgPath/part$partNumber.$partCloneType.$compExt
+			if [ "$xferMode" = "nfs" ] || [ "$xferMode" = "nfs+http" ] || [ "$xferMode" = "smb" ] || [ "$xferMode" = "smb+http" ]; then
+				if [ "$compAlg" = "none" ]; then
+				  log " ...... reporter $hostName $web & partclone.$partCloneType -B -c -s $hd$partNumber -o /images/$imgPath/part$partNumber.$partCloneType.$compExt"		
+				  reporter $hostName $web & partclone.$partCloneType -B -c -s $hd$partNumber -o /images/$imgPath/part$partNumber.$partCloneType.$compExt
+        else
+				  log " ...... reporter $hostName $web & partclone.$partCloneType -B -c -s $hd$partNumber | $compAlg $compLevel -c > /images/$imgPath/part$partNumber.$partCloneType.$compExt"		
+				  reporter $hostName $web & partclone.$partCloneType -B -c -s $hd$partNumber | $compAlg $compLevel -c > /images/$imgPath/part$partNumber.$partCloneType.$compExt
+			  fi
 			
 			else
 				log " ...... reporter $hostName $web & partclone.$partCloneType -B -c -s $hd$partNumber | udp-sender --no-progress --min-receivers 1 --pointopoint --nokbd --ttl 32 --portbase $portBase --start-timeout 30"
