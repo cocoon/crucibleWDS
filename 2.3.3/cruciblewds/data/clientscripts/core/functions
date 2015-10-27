@@ -1735,8 +1735,8 @@ function downloadImage()
 			
 			if [ "$xferMode" = "nfs" ] || [ "$xferMode" = "smb" ]; then
 				if [ "$partCompAlg" = "none" ]; then
-          log "reporter $hostName $web & /images/$imgPath/$unesLV.$fsType.$partCompExt | partclone.$fsType -B -r -o /dev/mapper/$lv"
-          reporter $hostName $web & /images/$imgPath/$unesLV.$fsType.$partCompExt | partclone.$fsType -B -r -o /dev/mapper/$lv	
+          log "reporter $hostName $web & partclone.$fsType -B -r -o /dev/mapper/$lv" -s /images/$imgPath/$unesLV.$fsType.$partCompExt
+          reporter $hostName $web & partclone.$fsType -B -r -o /dev/mapper/$lv -s /images/$imgPath/$unesLV.$fsType.$partCompExt	
         else
           log "reporter $hostName $web & $partCompAlg /images/$imgPath/$unesLV.$fsType.$partCompExt | partclone.$fsType -B -r -o /dev/mapper/$lv"
           reporter $hostName $web & $partCompAlg /images/$imgPath/$unesLV.$fsType.$partCompExt | partclone.$fsType -B -r -o /dev/mapper/$lv
@@ -1792,8 +1792,8 @@ function downloadImage()
 			
 			if [ "$xferMode" = "nfs" ] || [ "$xferMode" = "smb" ]; then
 				if [ "$partCompAlg" = "none" ]; then
-          log "reporter $hostName $web & /images/$imgPath/part$x.$fsType.$partCompExt | partclone.$fsType -B -r -o $hd$x"
-  				reporter $hostName $web & /images/$imgPath/part$x.$fsType.$partCompExt | partclone.$fsType -B -r -o $hd$x        
+          log "reporter $hostName $web & partclone.$fsType -B -r -o $hd$x" -s /images/$imgPath/part$x.$fsType.$partCompExt
+  				reporter $hostName $web & partclone.$fsType -B -r -o $hd$x -s /images/$imgPath/part$x.$fsType.$partCompExt        
         else
           log "reporter $hostName $web & $partCompAlg /images/$imgPath/part$x.$fsType.$partCompExt | partclone.$fsType -B -r -o $hd$x"
   				reporter $hostName $web & $partCompAlg /images/$imgPath/part$x.$fsType.$partCompExt | partclone.$fsType -B -r -o $hd$x
