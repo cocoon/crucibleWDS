@@ -1734,8 +1734,13 @@ function downloadImage()
 			touch /tmp/clone.progress
 			
 			if [ "$xferMode" = "nfs" ] || [ "$xferMode" = "smb" ]; then
-				log "reporter $hostName $web & $partCompAlg /images/$imgPath/$unesLV.$fsType.$partCompExt | partclone.$fsType -B -r -o /dev/mapper/$lv"
-				reporter $hostName $web & $partCompAlg /images/$imgPath/$unesLV.$fsType.$partCompExt | partclone.$fsType -B -r -o /dev/mapper/$lv		
+				if [ "$partCompAlg" = "none" ]; then
+          log "reporter $hostName $web & /images/$imgPath/$unesLV.$fsType.$partCompExt | partclone.$fsType -B -r -o /dev/mapper/$lv"
+          reporter $hostName $web & /images/$imgPath/$unesLV.$fsType.$partCompExt | partclone.$fsType -B -r -o /dev/mapper/$lv	
+        else
+          log "reporter $hostName $web & $partCompAlg /images/$imgPath/$unesLV.$fsType.$partCompExt | partclone.$fsType -B -r -o /dev/mapper/$lv"
+          reporter $hostName $web & $partCompAlg /images/$imgPath/$unesLV.$fsType.$partCompExt | partclone.$fsType -B -r -o /dev/mapper/$lv
+        fi		
 			else
         if [ "$partCompAlg" = "none" ]; then
           log "reporter $hostName $web & curl -sSk -FserverKey=\"$(echo -n "$WDS_KEY" | base64)\" -FimgName=\"$(echo -n $imgPath | base64)\" -FpartName=\"$(echo -n $unesLV.$fsType.$partCompExt | base64)\" \"${web}downloadimage\" | partclone.$fsType -B -r -o /dev/mapper/$lv"
@@ -1786,8 +1791,13 @@ function downloadImage()
 			touch /tmp/clone.progress
 			
 			if [ "$xferMode" = "nfs" ] || [ "$xferMode" = "smb" ]; then
-				log "reporter $hostName $web & $partCompAlg /images/$imgPath/part$x.$fsType.$partCompExt | partclone.$fsType -B -r -o $hd$x"
-				reporter $hostName $web & $partCompAlg /images/$imgPath/part$x.$fsType.$partCompExt | partclone.$fsType -B -r -o $hd$x			
+				if [ "$partCompAlg" = "none" ]; then
+          log "reporter $hostName $web & /images/$imgPath/part$x.$fsType.$partCompExt | partclone.$fsType -B -r -o $hd$x"
+  				reporter $hostName $web & /images/$imgPath/part$x.$fsType.$partCompExt | partclone.$fsType -B -r -o $hd$x        
+        else
+          log "reporter $hostName $web & $partCompAlg /images/$imgPath/part$x.$fsType.$partCompExt | partclone.$fsType -B -r -o $hd$x"
+  				reporter $hostName $web & $partCompAlg /images/$imgPath/part$x.$fsType.$partCompExt | partclone.$fsType -B -r -o $hd$x
+        fi			
 			else
         if [ "$partCompAlg" = "none" ]; then
           log "reporter $hostName $web & curl -sSk -FserverKey=\"$(echo -n "$WDS_KEY" | base64)\" -FimgName=\"$(echo -n $imgPath | base64)\" -FpartName=\"$(echo -n part$x.$fsType.$partCompExt | base64)\" \"${web}downloadimage\" | partclone.$fsType -B -r -o $hd$x"
@@ -1929,4 +1939,3 @@ function uploadImage()
 		clear
 	done
 }
-
