@@ -88,6 +88,7 @@ hr{border:solid #ddd;border-width:1px 0 0;clear:both;margin:10px 0 30px;height:0
 
 /* Gridviews
 ================================================== */
+/*
 table{margin-bottom:30px;margin-top:10px;}
 Table.Gridview{border:none;white-space:nowrap; width:1000px;}
 .GridviewTable{border:none;}
@@ -97,7 +98,21 @@ Table.Gridview{border:none;white-space:nowrap; width:1000px;}
 .Gridview tr{color:#666;background-color:white;text-align:left;border-bottom:1px solid #f5f5f5;}
 .Gridview .alt{background:#f8f8f8;}
 .Gridview td a:link, .GridView td a:visited {color:white;text-decoration:none;background:#464242;-webkit-border-radius:5px;-moz-border-radius:5px;-ms-border-radius:5px;-o-border-radius:5px;border-radius:5px;padding:5px 10px;}
-.Gridview a:visited {background:#464242; }
+.Gridview a:visited {background:#464242;}*/
+table{margin-bottom:30px;margin-top:10px;}
+Table.Gridview{border:none;white-space:nowrap; width:1000px;}
+.GridviewTable{border:none;}
+.Gridview th{text-align:left;color:White;border:none;padding-bottom:.5em;padding-top:.5em;background-color:#47a3da;}
+.Gridview th a:link{color:White;text-decoration:none;}
+.Gridview th a:visited{color:White;text-decoration:none;}
+.Gridview td{border:none;padding:.7em 1em .7em .05em;}
+.Gridview tr{color:#666;background-color:white;text-align:left;border-bottom:1px solid #f5f5f5;}
+.Gridview .alt{background:#f8f8f8;}
+.Gridview td a:link {color:white;text-decoration:none;background:#464242;-webkit-border-radius:5px;-moz-border-radius:5px;-ms-border-radius:5px;-o-border-radius:5px;border-radius:5px;padding:5px 10px;}
+.GridView td a:visited {color:white;text-decoration:none;background:#464242;-webkit-border-radius:5px;-moz-border-radius:5px;-ms-border-radius:5px;-o-border-radius:5px;border-radius:5px;padding:5px 10px;}
+td a:link {color:white;text-decoration:none;background:#464242;-webkit-border-radius:5px;-moz-border-radius:5px;-ms-border-radius:5px;-o-border-radius:5px;border-radius:5px;padding:5px 10px;}
+td a:visited {color:white;text-decoration:none;background:#464242;-webkit-border-radius:5px;-moz-border-radius:5px;-ms-border-radius:5px;-o-border-radius:5px;border-radius:5px;padding:5px 10px;}
+.Gridview a:visited {background:#464242;}
 
 Table.log{white-space:normal; word-wrap:break-word;}
 .log tr {border:none; }
